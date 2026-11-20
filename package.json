@@ -1,0 +1,71 @@
+{
+  "name": "taskforce-model-foundry",
+  "version": "0.1.0",
+  "description": "Taskforce Model Foundry: automated private-data model customization engine for OpenClaw and Hermes. Real post-training (weight/adapter updates), independent holdout evaluation, auditable jobs, and signed export lineage.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "tmf": "bin/tmf.mjs"
+  },
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./api": "./src/api.mjs",
+    "./integrations/openclaw": "./src/integrations/openclaw.mjs",
+    "./integrations/openclaw-plugin": "./integrations/openclaw-plugin/index.mjs",
+    "./integrations/openclaw-plugin/tools": "./integrations/openclaw-plugin/tools.mjs",
+    "./integrations/hermes": "./src/integrations/hermes.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "docs/",
+    "openclaw.plugin.json",
+    "integrations/openclaw-plugin/",
+    "integrations/hermes-plugin/",
+    "scripts/e2e-demo.sh",
+    "README.md",
+    "package.json",
+    "!**/__pycache__",
+    "!**/*.pyc"
+  ],
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "demo": "bash scripts/e2e-demo.sh",
+    "doctor": "node bin/tmf.mjs doctor"
+  },
+  "dependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ambitioncn/taskforce-model-foundry.git"
+  },
+  "keywords": [
+    "llm",
+    "post-training",
+    "lora",
+    "fine-tuning",
+    "openclaw",
+    "hermes",
+    "model-foundry"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./integrations/openclaw-plugin/index.mjs"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.5.17"
+    }
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  }
+}

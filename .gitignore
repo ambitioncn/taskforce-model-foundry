@@ -1,0 +1,11 @@
+node_modules/
+*.tgz
+.tmf-run/
+runs/
+.DS_Store
+__pycache__/
+*.pyc
+
+.env
+.env.*
+!.env.example

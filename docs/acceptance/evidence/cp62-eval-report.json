@@ -1,0 +1,279 @@
+{
+  "format": "tmf-eval-report-v1",
+  "jobId": "cp62-lr005",
+  "startedAt": "2026-11-19T14:32:47.872Z",
+  "finishedAt": "2026-11-19T14:33:09.628Z",
+  "backend": {
+    "id": "builtin-js",
+    "label": null
+  },
+  "inputs": {
+    "baseCheckpoint": {
+      "file": "/tmp/tmf-cp57/.tmf-run/cp62-lr005/model/base.json",
+      "sha256": "45b178f6ee79fe3d9c820eea57fbd8b45424361245ef6871ccd3edea36b139fa"
+    },
+    "adapterCheckpoint": null,
+    "tunedCheckpoint": {
+      "file": "/tmp/tmf-cp57/.tmf-run/cp62-lr005/model/tuned.json",
+      "sha256": "38e9e708924c9c90bcc9b5bf17644cb3dde8a342308abc31f9a5ea9849af67db"
+    },
+    "splits": {
+      "holdout": 61,
+      "validation": 60,
+      "trainWithheld": 284
+    }
+  },
+  "independence": {
+    "ok": true,
+    "holdout": 61,
+    "train": 284,
+    "validation": 60,
+    "holdoutFingerprint": "35600544d40af3b806611b3dcac13ef97c7cbcaf257efb2aef7e985c9644bd6b"
+  },
+  "metrics": {
+    "baseline": {
+      "holdout": {
+        "loss": 4.82943,
+        "perplexity": 125.139575,
+        "tokens": 3355,
+        "examples": 61,
+        "exactMatch": {
+          "accuracy": 0,
+          "hit": 0,
+          "total": 37,
+          "considered": 61,
+          "excluded": 24,
+          "normalized": {
+            "hit": 0,
+            "total": 37,
+            "accuracy": 0
+          },
+          "fields": [
+            {
+              "field": "priority",
+              "hit": 0,
+              "total": 37,
+              "accuracy": 0
+            },
+            {
+              "field": "queue",
+              "hit": 0,
+              "total": 37,
+              "accuracy": 0
+            }
+          ],
+          "characterF1": {
+            "precision": 0.017775,
+            "recall": 0.029865,
+            "f1": 0.022286
+          },
+          "samples": [
+            {
+              "prompt": "route\nsubject: hiring escalation urgent ticket",
+              "got": "mmbbgmbmbmmmEmmCEmmbmbd[EmEmmmmmmmmmEgmmmmEmmmmm",
+              "want": "\nqueue=people\npriority=p1\n"
+            },
+            {
+              "prompt": "route\nsubject: shipping ticket critical audit",
+              "got": "mbmbCbbbmbmE[EcmCEEmbmmm[EEEE[[mEmmmmEgmmmmmmmmm",
+              "want": "\nqueue=logistics\npriority=p1\n"
+            },
+            {
+              "prompt": "route\nsubject: hiring audit urgent invoice",
+              "got": "gmbmbmbggEbmbmbEE[EgmbEEgmb[EgEgmbmbmb[EEgmEEgmb",
+              "want": "\nqueue=people\npriority=p1\n"
+            }
+          ]
+        }
+      },
+      "validation": {
+        "loss": 4.848206,
+        "perplexity": 127.511389,
+        "tokens": 3315,
+        "examples": 60
+      }
+    },
+    "tuned": {
+      "holdout": {
+        "loss": 0.248876,
+        "perplexity": 1.282584,
+        "tokens": 3355,
+        "examples": 61,
+        "exactMatch": {
+          "accuracy": 1,
+          "hit": 37,
+          "total": 37,
+          "considered": 61,
+          "excluded": 24,
+          "normalized": {
+            "hit": 37,
+            "total": 37,
+            "accuracy": 1
+          },
+          "fields": [
+            {
+              "field": "priority",
+              "hit": 37,
+              "total": 37,
+              "accuracy": 1
+            },
+            {
+              "field": "queue",
+              "hit": 37,
+              "total": 37,
+              "accuracy": 1
+            }
+          ],
+          "characterF1": {
+            "precision": 1,
+            "recall": 1,
+            "f1": 1
+          },
+          "samples": [
+            {
+              "prompt": "route\nsubject: hiring escalation urgent ticket",
+              "got": "\nqueue=people\npriority=p1\n",
+              "want": "\nqueue=people\npriority=p1\n"
+            },
+            {
+              "prompt": "route\nsubject: shipping ticket critical audit",
+              "got": "\nqueue=logistics\npriority=p1\n",
+              "want": "\nqueue=logistics\npriority=p1\n"
+            },
+            {
+              "prompt": "route\nsubject: hiring audit urgent invoice",
+              "got": "\nqueue=people\npriority=p1\n",
+              "want": "\nqueue=people\npriority=p1\n"
+            }
+          ]
+        }
+      },
+      "validation": {
+        "loss": 0.253551,
+        "perplexity": 1.288593,
+        "tokens": 3315,
+        "examples": 60
+      }
+    },
+    "improvement": {
+      "holdoutLossRelative": 0.948467,
+      "holdoutLossAbsolute": 4.580554,
+      "validationLossRelative": 0.947702,
+      "exactMatchAbsolute": 1
+    }
+  },
+  "gates": {
+    "passed": true,
+    "results": [
+      {
+        "id": "holdout_loss_improvement",
+        "metric": "improvement.holdoutLossRelative",
+        "comparator": "gte",
+        "threshold": 0.3,
+        "description": "post-training must cut holdout loss by at least 30% relative to the baseline",
+        "actual": 0.948467,
+        "ok": true,
+        "reason": null
+      },
+      {
+        "id": "holdout_loss_absolute",
+        "metric": "tuned.holdout.loss",
+        "comparator": "lte",
+        "threshold": 1.5,
+        "description": "absolute holdout loss ceiling",
+        "actual": 0.248876,
+        "ok": true,
+        "reason": null
+      },
+      {
+        "id": "exact_match",
+        "metric": "tuned.holdout.exactMatch.accuracy",
+        "comparator": "gte",
+        "threshold": 0.25,
+        "sampleMetric": "tuned.holdout.exactMatch.total",
+        "minSamples": 10,
+        "description": "greedy-decoded completions must match exactly on at least a quarter of the holdout set",
+        "actual": 1,
+        "samples": 37,
+        "ok": true,
+        "reason": null
+      },
+      {
+        "id": "exact_match_improvement",
+        "metric": "improvement.exactMatchAbsolute",
+        "comparator": "gte",
+        "threshold": 0.1,
+        "sampleMetric": "tuned.holdout.exactMatch.total",
+        "minSamples": 10,
+        "description": "exact match must improve over the baseline by at least 10 points",
+        "actual": 1,
+        "samples": 37,
+        "ok": true,
+        "reason": null
+      },
+      {
+        "id": "no_validation_regression",
+        "metric": "improvement.validationLossRelative",
+        "comparator": "gte",
+        "threshold": -0.05,
+        "description": "validation loss must not regress by more than 5% relative",
+        "actual": 0.947702,
+        "ok": true,
+        "reason": null
+      }
+    ],
+    "failed": [],
+    "summary": "5/5 gates passed"
+  },
+  "verdict": {
+    "status": "passed",
+    "improvementClaimAllowed": true,
+    "deliveryEligible": true,
+    "summary": "improvement confirmed on an independent holdout (5/5 gates passed)"
+  },
+  "lineage": {
+    "jobId": "cp62-lr005",
+    "project": "tmf-cp57-local-cpu",
+    "mode": "full-finetune",
+    "seed": "tmf-train",
+    "dataDir": "/tmp/tmf-cp57/.tmf-run/cp62-lr005/data",
+    "dataReportFile": "/tmp/tmf-cp57/.tmf-run/cp62-lr005/data/data-report.json",
+    "baseFingerprint": "a26f9e691150ccd4a4879bd37c78b7b78d238e14faa082d6c02bab535a3eb775",
+    "tunedFingerprint": "6223094bb510546dc08fe9dc6e6e1a107fd8d1364a74254c561114420e9ed9c3",
+    "adapterBoundToBase": null,
+    "gateDefinitions": [
+      {
+        "id": "holdout_loss_improvement",
+        "metric": "improvement.holdoutLossRelative",
+        "comparator": "gte",
+        "threshold": 0.3
+      },
+      {
+        "id": "holdout_loss_absolute",
+        "metric": "tuned.holdout.loss",
+        "comparator": "lte",
+        "threshold": 1.5
+      },
+      {
+        "id": "exact_match",
+        "metric": "tuned.holdout.exactMatch.accuracy",
+        "comparator": "gte",
+        "threshold": 0.25
+      },
+      {
+        "id": "exact_match_improvement",
+        "metric": "improvement.exactMatchAbsolute",
+        "comparator": "gte",
+        "threshold": 0.1
+      },
+      {
+        "id": "no_validation_regression",
+        "metric": "improvement.validationLossRelative",
+        "comparator": "gte",
+        "threshold": -0.05
+      }
+    ],
+    "gateDefinitionsDigest": "6540d9455123ef5d2475da2da9ef76301c83cc3945f6682345b37037af0215bd"
+  },
+  "reportDigest": "8b1a8ea786a73eae60b4b5367f99473cbe1733fe36ac0c349761694e3e8733bf"
+}

@@ -1,0 +1,24 @@
+{
+  "id": "taskforce-model-foundry",
+  "name": "Taskforce Model Foundry",
+  "description": "Taskforce Model Foundry tools (contract v1).",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "tmf_doctor",
+      "tmf_status",
+      "tmf_synthesize",
+      "tmf_train",
+      "tmf_evaluate",
+      "tmf_export"
+    ]
+  }
+}

@@ -1,0 +1,294 @@
+#!/usr/bin/env node
+// The `tmf` command line.
+//
+// A thin, honest shell over src/api.mjs: it parses flags, prints human or JSON
+// output, and maps outcomes to exit codes (0 ok, 1 failed check/invalid input,
+// 2 usage error). It contains no training logic of its own.
+
+import path from 'node:path';
+import process from 'node:process';
+import { doctor, synthesize, train, status, evaluate, exportModel } from '../src/api.mjs';
+import {
+  loadConfig, validateConfig, exampleConfig, formatConfigErrors, ConfigError,
+  DEFAULT_CONFIG_FILES,
+} from '../src/config.mjs';
+import { writeJson, readJson, exists } from '../src/core/fsx.mjs';
+import { VERSION } from '../src/index.mjs';
+
+const USAGE = `taskforce-model-foundry ${VERSION}
+
+Usage: tmf <command> [options]
+
+Commands:
+  doctor                 Check environment, backends and config
+  init                   Write a starter tmf.config.json (+ synthetic data)
+  config validate [file] Validate a config file and print every problem
+  backends               List trainer backends and availability
+  synth                  Generate a synthetic corpus (no private data needed)
+  train                  Run a real post-training job
+  evaluate               Score a finished job on an independent holdout
+  export                 Package a deliverable bundle (gated on evaluation)
+                         --report <file> reuses an existing eval report instead of re-evaluating
+  status <jobId>         Show durable job state and recent audit events
+  version                Print the version
+  help                   Print this help
+
+Options:
+  -c, --config <file>    Config file (default: ${DEFAULT_CONFIG_FILES.join(' or ')})
+  -C, --cwd <dir>        Base directory (default: current directory)
+      --json             Machine-readable JSON output
+      --job <id>         Job id (train)
+      --out <dir>        Output directory (synth/init, default: data)
+      --count <n>        Record count (synth/init, default: 160)
+      --resume-cancelled Resume a job that an operator cancelled
+      --no-resume        Ignore existing job state instead of resuming
+`;
+
+function parseArgs(argv) {
+  const opts = { _: [], json: false, resume: true, resumeCancelled: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const next = () => {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('-')) throw new UsageError(`${arg} requires a value`);
+      i += 1;
+      return value;
+    };
+    switch (arg) {
+      case '-c': case '--config': opts.config = next(); break;
+      case '-C': case '--cwd': opts.cwd = next(); break;
+      case '--json': opts.json = true; break;
+      case '--job': opts.job = next(); break;
+      case '--out': opts.out = next(); break;
+      case '--report': opts.report = next(); break;
+      case '--bundle-version': opts.bundleVersion = next(); break;
+      case '--count': opts.count = Number(next()); break;
+      case '--resume-cancelled': opts.resumeCancelled = true; break;
+      case '--no-resume': opts.resume = false; break;
+      case '-h': case '--help': opts.help = true; break;
+      case '-v': case '--version': opts.version = true; break;
+      default:
+        if (arg.startsWith('-')) throw new UsageError(`unknown option: ${arg}`);
+        opts._.push(arg);
+    }
+  }
+  return opts;
+}
+
+class UsageError extends Error {}
+
+// Runner step records are objects; older state files may hold bare names.
+function stepNames(steps) {
+  return (steps ?? []).map((step) => (typeof step === 'string' ? step : step?.name)).filter(Boolean);
+}
+
+function out(opts, payload, lines) {
+  if (opts.json) console.log(JSON.stringify(payload, null, 2));
+  else for (const line of lines) console.log(line);
+}
+
+async function cmdDoctor(opts, baseDir) {
+  const report = await doctor({ baseDir, configFile: opts.config ?? null, requireConfig: false });
+  out(opts, report, [
+    `tmf doctor — ${report.ok ? 'OK' : 'FAILED'}`,
+    `node ${report.node} on ${report.platform}`,
+    ...report.checks.map((c) => `  [${c.ok ? 'ok ' : c.level === 'required' ? 'FAIL' : 'warn'}] ${c.id}: ${c.detail}`),
+    ...(report.configErrors.length ? ['config problems:', formatConfigErrors(report.configErrors)] : []),
+  ]);
+  return report.ok ? 0 : 1;
+}
+
+async function cmdInit(opts, baseDir) {
+  const file = path.resolve(baseDir, opts.config ?? DEFAULT_CONFIG_FILES[0]);
+  if (await exists(file)) {
+    console.error(`refusing to overwrite existing config: ${file}`);
+    return 1;
+  }
+  const dataDir = opts.out ?? 'data';
+  const config = exampleConfig({ project: path.basename(baseDir), dataDir });
+  const corpus = await synthesize({ baseDir, outDir: dataDir, taskCount: opts.count ?? 160 });
+  config.data.datasets = Object.entries(corpus.files ?? {}).map(([name, p]) => ({
+    name,
+    path: path.relative(baseDir, p),
+    format: 'jsonl',
+    license: 'synthetic',
+    source: 'tmf synth',
+  }));
+  if (config.data.datasets.length === 0) config.data.datasets = exampleConfig({ dataDir }).data.datasets;
+  await writeJson(file, config);
+  out(opts, { configFile: file, datasets: config.data.datasets }, [
+    `wrote ${file}`,
+    `synthetic corpus in ${corpus.outDir}`,
+    'next: tmf doctor, then tmf train',
+  ]);
+  return 0;
+}
+
+async function cmdConfig(opts, baseDir, rest) {
+  if (rest[0] !== 'validate') throw new UsageError('usage: tmf config validate [file]');
+  const file = rest[1] ?? opts.config ?? null;
+  try {
+    const loaded = await loadConfig({ file, baseDir });
+    out(opts, { ok: true, file: loaded.file, config: loaded.config }, [`config OK: ${loaded.file}`]);
+    return 0;
+  } catch (err) {
+    if (!(err instanceof ConfigError)) throw err;
+    out(opts, { ok: false, errors: err.errors, message: err.message }, [err.message, formatConfigErrors(err.errors)]);
+    return 1;
+  }
+}
+
+async function cmdBackends(opts) {
+  const report = await doctor({ baseDir: process.cwd() });
+  out(opts, report.backends, report.backends.map(
+    (b) => `${b.available ? 'available  ' : 'unavailable'} ${b.id} modes=${(b.capabilities?.modes ?? []).join('|')}${b.available ? '' : ` (${b.reason})`}`,
+  ));
+  return report.backends.some((b) => b.available) ? 0 : 1;
+}
+
+async function cmdSynth(opts, baseDir) {
+  const corpus = await synthesize({ baseDir, outDir: opts.out ?? 'data', taskCount: opts.count ?? 160 });
+  out(opts, corpus, [`synthetic corpus written to ${corpus.outDir}`,
+    ...Object.entries(corpus.files ?? {}).map(([k, v]) => `  ${k}: ${v}`)]);
+  return 0;
+}
+
+async function cmdTrain(opts, baseDir) {
+  const { file, config } = await loadConfig({ file: opts.config ?? null, baseDir });
+  const { job, artifacts } = await train({
+    config, baseDir, jobId: opts.job ?? null, resume: opts.resume, resumeCancelled: opts.resumeCancelled,
+  });
+  const ok = job.state === 'succeeded';
+  out(opts, { configFile: file, job, artifacts }, [
+    `job ${job.jobId}: ${job.state}`,
+    `steps: ${stepNames(job.completedSteps).join(' -> ') || '(none)'}`,
+    ...(ok ? [
+      `base checkpoint: ${artifacts.baseCheckpoint}`,
+      `${artifacts.adapterCheckpoint ? 'adapter' : 'tuned'} checkpoint: ${artifacts.adapterCheckpoint ?? artifacts.tunedCheckpoint}`,
+      `training steps: ${artifacts.metrics?.steps ?? '?'}  parameter L2 delta: ${artifacts.metrics?.parameterL2Delta ?? '?'}`,
+    ] : [`error: ${job.error?.message ?? 'see audit log'}`]),
+  ]);
+  return ok ? 0 : 1;
+}
+
+async function cmdEvaluate(opts, baseDir) {
+  const { file, config } = await loadConfig({ file: opts.config ?? null, baseDir });
+  const { artifacts, report } = await evaluate({
+    config, baseDir, jobId: opts.job ?? null, reportFile: opts.report ?? null,
+  });
+  const ok = report.verdict.status === 'passed';
+  out(opts, { configFile: file, artifacts, report }, [
+    `evaluation ${report.verdict.status}: ${report.verdict.summary}`,
+    `holdout records: ${report.inputs?.splits?.holdout ?? '?'}  leakage: ${report.independence?.leaked?.length ?? 0}`,
+    ...report.gates.results.map((g) => `  [${g.ok ? 'ok ' : 'FAIL'}] ${g.id}: ${gateLine(g)}`),
+    `report: ${report.reportFile ?? '(not written)'}`,
+  ]);
+  return ok ? 0 : 1;
+}
+
+// Gate results carry `reason` only when they fail; a passing gate still needs a
+// readable line, so restate the metric it cleared.
+function gateLine(g) {
+  if (g.reason) return g.reason;
+  const comparator = { gte: '>=', lte: '<=', gt: '>', lt: '<' }[g.comparator] ?? g.comparator;
+  if (g.actual === null || g.actual === undefined) return `${g.metric} not measurable (needs ${comparator} ${g.threshold})`;
+  return `${g.metric}=${g.actual} meets ${comparator} ${g.threshold}`;
+}
+
+async function cmdExport(opts, baseDir) {
+  const { file, config } = await loadConfig({ file: opts.config ?? null, baseDir });
+  let bundle;
+  let report;
+  // --report pins the bundle to an existing report instead of re-evaluating,
+  // so the exported lineage carries the digest that was actually reviewed.
+  let evalReport = null;
+  if (opts.report) {
+    const reportFile = path.resolve(baseDir, opts.report);
+    if (!(await exists(reportFile))) throw new UsageError(`eval report not found: ${reportFile}`);
+    evalReport = await readJson(reportFile);
+  }
+  try {
+    ({ bundle, report } = await exportModel({
+      config, baseDir, jobId: opts.job ?? null, outDir: opts.out ?? null, version: opts.bundleVersion ?? null,
+      evalReport, evaluateIfMissing: !evalReport,
+    }));
+  } catch (err) {
+    // A blocked export is an expected outcome, not a crash: report the reason
+    // and the failed gates instead of a stack trace.
+    if (err?.code !== 'EXPORT_BLOCKED') throw err;
+    out(opts, { ok: false, code: err.code, reason: err.message, verdict: err.report?.verdict ?? null }, [
+      err.message,
+      ...(err.report?.gates?.results ?? []).filter((g) => !g.ok).map((g) => `  [FAIL] ${g.id}: ${gateLine(g)}`),
+    ]);
+    return 1;
+  }
+  out(opts, { configFile: file, bundle, verdict: report.verdict }, [
+    `exported ${bundle.manifest.name} ${bundle.manifest.version} (${bundle.manifest.kind})`,
+    `bundle: ${bundle.outDir}`,
+    `digest: ${bundle.bundleDigest}`,
+    `files: ${bundle.files.length}  verify: sha256sum -c checksums.txt`,
+  ]);
+  return 0;
+}
+
+async function cmdStatus(opts, baseDir, rest) {
+  const jobId = rest[0] ?? opts.job;
+  if (!jobId) throw new UsageError('usage: tmf status <jobId>');
+  const { config } = await loadConfig({ file: opts.config ?? null, baseDir });
+  const report = await status({ config, baseDir, jobId });
+  if (!report.found) {
+    out(opts, report, [`job ${jobId}: not found`]);
+    return 1;
+  }
+  out(opts, report, [
+    `job ${jobId}: ${report.state.state} (attempt ${report.state.attempt ?? 1})`,
+    `steps: ${stepNames(report.state.completedSteps).join(' -> ') || '(none)'}`,
+    `audit events: ${report.auditCount}`,
+    ...report.audit.map((e) => `  ${e.at ?? ''} ${e.event}`),
+  ]);
+  return 0;
+}
+
+async function main(argv) {
+  let opts;
+  try {
+    opts = parseArgs(argv);
+  } catch (err) {
+    console.error(err.message);
+    console.error(USAGE);
+    return 2;
+  }
+  // `-h/--help` and `-v/--version` short-circuit before dispatch so that
+  // `tmf init --help` prints usage instead of actually writing files.
+  if (opts.help) { console.log(USAGE); return 0; }
+  if (opts.version) { console.log(VERSION); return 0; }
+  const [command = 'help', ...rest] = opts._;
+  const baseDir = path.resolve(opts.cwd ?? process.cwd());
+  switch (command) {
+    case 'help': console.log(USAGE); return 0;
+    case 'version': console.log(VERSION); return 0;
+    case 'doctor': return cmdDoctor(opts, baseDir);
+    case 'init': return cmdInit(opts, baseDir);
+    case 'config': return cmdConfig(opts, baseDir, rest);
+    case 'backends': return cmdBackends(opts);
+    case 'synth': return cmdSynth(opts, baseDir);
+    case 'train': return cmdTrain(opts, baseDir);
+    case 'evaluate': case 'eval': return cmdEvaluate(opts, baseDir);
+    case 'export': return cmdExport(opts, baseDir);
+    case 'status': return cmdStatus(opts, baseDir, rest);
+    default:
+      console.error(`unknown command: ${command}`);
+      console.error(USAGE);
+      return 2;
+  }
+}
+
+main(process.argv.slice(2)).then((code) => process.exit(code), (err) => {
+  if (err instanceof ConfigError) {
+    console.error(err.message);
+    console.error(formatConfigErrors(err.errors));
+    process.exit(1);
+  }
+  console.error(err?.stack ?? String(err));
+  process.exit(1);
+});

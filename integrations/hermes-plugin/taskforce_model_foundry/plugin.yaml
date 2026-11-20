@@ -1,0 +1,7 @@
+name: taskforce-model-foundry
+version: 0.1.0
+description: Taskforce Model Foundry tools (synthesize, train, evaluate, export) for Hermes.
+author: Taskforce
+manifest_version: 2
+api_version: 1
+hooks: []

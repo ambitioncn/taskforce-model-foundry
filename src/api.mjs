@@ -196,7 +196,12 @@ async function loadEvalSplits({ backend, artifacts, maxSeqLen }) {
     const file = path.join(artifacts.dataDir, `${split}.jsonl`);
     if (!(await exists(file))) continue;
     records[split] = await readJsonl(file);
-    encoded[split] = encodeRecords(records[split], handle.tokenizer, { maxSeqLen }).examples;
+    // Same backend contract the training job uses: whichever side owns the
+    // tokenizer is the side that encodes, so evaluation never feeds a
+    // job-built vocabulary to a model that carries its own.
+    encoded[split] = typeof backend.prepareDataset === 'function'
+      ? (await backend.prepareDataset({ handle, records: records[split], maxSeqLen })).examples
+      : encodeRecords(records[split], handle.tokenizer, { maxSeqLen }).examples;
   }
   if (!encoded.holdout?.length) {
     throw new Error(`evaluate: no encodable holdout split under ${artifacts.dataDir}`);

@@ -14,7 +14,7 @@
 import path from 'node:path';
 import { runJob, JobCancelledError } from './runner.mjs';
 import { runDataPipeline } from '../data/pipeline.mjs';
-import { buildTokenizer, encodeRecords, countTokens } from '../train/dataset.mjs';
+import { buildTokenizer, encodeRecords } from '../train/dataset.mjs';
 import { ensureDir, readJsonl, writeJson } from '../core/fsx.mjs';
 import { sha256Json } from '../core/hash.mjs';
 
@@ -138,8 +138,19 @@ export async function runTrainingJob({
       run: async ({ outputs, audit }) => {
         const trainRecords = await readJsonl(splitFile(outputs.data.dataDir, 'train'));
         if (trainRecords.length === 0) throw new Error('data step produced an empty train split');
-        const tokenizer = buildTokenizer(trainRecords, { maxVocab });
-        const handle = await backend.createModel({ modelConfig, tokenizer, seed: 1 });
+        // Tokenizer ownership is a backend capability, not a job assumption: a
+        // backend whose model carries its own tokenizer (hf-peft) must not be
+        // handed a vocabulary built from this split, because ids from a JS
+        // vocabulary mean nothing to that model's embedding table.
+        const ownsTokenizer = backend.capabilities?.ownsTokenizer === true;
+        const tokenizer = ownsTokenizer ? null : buildTokenizer(trainRecords, { maxVocab });
+        const handle = await backend.createModel({
+          modelConfig,
+          tokenizer,
+          seed: 1,
+          modelId: modelConfig.modelId ?? modelConfig.baseModel ?? null,
+          outDir: modelDir,
+        });
         const file = path.join(modelDir, 'base.json');
         const saved = await backend.saveModel({
           handle,
@@ -148,8 +159,15 @@ export async function runTrainingJob({
           meta: { jobId, dataReportDigest: outputs.data.reportDigest },
         });
         const fingerprint = backend.fingerprint(handle);
-        await audit('base.saved', { file: saved.file, sha256: saved.sha256, vocabSize: tokenizer.size, fingerprint });
-        return { file: saved.file, sha256: saved.sha256, fingerprint, vocabSize: tokenizer.size };
+        const vocabSize = tokenizer ? tokenizer.size : null;
+        await audit('base.saved', {
+          file: saved.file,
+          sha256: saved.sha256,
+          vocabSize,
+          tokenizerOwner: ownsTokenizer ? 'backend' : 'job',
+          fingerprint,
+        });
+        return { file: saved.file, sha256: saved.sha256, fingerprint, vocabSize, tokenizerOwner: ownsTokenizer ? 'backend' : 'job' };
       },
     },
     {
@@ -160,33 +178,50 @@ export async function runTrainingJob({
         // the previous step) is what makes a resumed attempt equivalent to a
         // fresh process picking the job up.
         const handle = await backend.loadModel({ file: outputs.base.file });
-        const { examples, skipped } = encodeRecords(trainRecords, handle.tokenizer, { maxSeqLen });
+        // One call for both backends: prepareDataset() is the single place that
+        // knows whether ids come from a job-built vocabulary or from the
+        // model's own tokenizer. The fallback keeps older backends working.
+        const prepared = typeof backend.prepareDataset === 'function'
+          ? await backend.prepareDataset({ handle, records: trainRecords, maxSeqLen, outDir: modelDir })
+          : { ...encodeRecords(trainRecords, handle.tokenizer, { maxSeqLen }), tokens: null, tokenizer: 'job-built' };
+        const examples = prepared.examples ?? [];
+        const skipped = prepared.skipped ?? [];
         if (examples.length === 0) throw new Error('no train examples survived encoding');
         const beforeFingerprint = backend.fingerprint(handle);
         await audit('train.started', {
           mode,
           examples: examples.length,
           skipped: skipped.length,
-          tokens: countTokens(examples),
+          tokens: prepared.tokens ?? null,
+          tokenizer: prepared.tokenizer ?? 'job-built',
           baseFingerprint: beforeFingerprint,
         });
 
-        const { metrics, history, stopReason } = await backend.train({
+        const trained = await backend.train({
           handle,
           examples,
+          examplesFile: prepared.examplesFile ?? null,
           mode,
           hyper,
           budget: trainBudget,
           seed,
+          outDir: modelDir,
+          signal,
+          resume: null,
           hooks: { onStep: makeStepHook({ signal, audit, budget: jobBudget, auditEveryStep }) },
         });
+        const { metrics, history, stopReason } = trained;
+        // A backend may return a moved handle (hf-peft points it at the adapter
+        // directory the worker just wrote); saving the pre-train handle would
+        // persist a checkpoint that does not reference the trained weights.
+        const trainedHandle = trained.handle ?? handle;
 
         const historyFile = path.join(modelDir, 'train-history.json');
         await writeJson(historyFile, { jobId, mode, metrics, history });
         const isAdapter = mode === 'lora';
         const file = path.join(modelDir, isAdapter ? 'adapter.json' : 'tuned.json');
         const saved = await backend.saveModel({
-          handle,
+          handle: trainedHandle,
           file,
           kind: isAdapter ? 'adapter' : 'base',
           meta: {

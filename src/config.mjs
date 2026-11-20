@@ -8,6 +8,7 @@
 
 import path from 'node:path';
 import { readJson, exists } from './core/fsx.mjs';
+import { COMPARATORS } from './eval/gates.mjs';
 
 export const CONFIG_FORMAT = 'tmf-config-v1';
 export const DEFAULT_CONFIG_FILES = ['tmf.config.json', '.tmfrc.json'];
@@ -24,11 +25,12 @@ export const CONFIG_DEFAULTS = {
   hyper: {},
   budget: {},
   trainBudget: {},
+  eval: {},
 };
 
 const TOP_LEVEL = new Set([
   'format', 'project', 'runRoot', 'backend', 'mode', 'seed',
-  'model', 'data', 'hyper', 'budget', 'trainBudget',
+  'model', 'data', 'hyper', 'budget', 'trainBudget', 'eval',
 ]);
 // Mode names must match what a trainer backend advertises in
 // capabilities.modes; anything else can never pass doctor's mode check.
@@ -112,6 +114,69 @@ function validateBudget(errors, at, raw) {
     out[key] = value;
   }
   return out;
+}
+
+// Gate thresholds are project policy, not a toolkit constant: what counts as
+// an acceptable holdout loss depends on the model and the task, and the
+// built-in defaults were tuned against the builtin-js demo. They stayed
+// unreachable until now -- api.mjs already read `eval.gates`, but `eval` was
+// not an allowed top-level key, so no config could ever set it. Declaring a
+// gate list replaces the defaults wholesale rather than merging, because a
+// half-overridden gate set is the kind of thing that silently drops a check.
+const GATE_KEYS = new Set(['id', 'metric', 'comparator', 'threshold', 'sampleMetric', 'minSamples', 'description']);
+
+function validateGate(errors, at, raw) {
+  if (!isPlainObject(raw)) {
+    errors.add(at, 'must be an object');
+    return null;
+  }
+  for (const key of Object.keys(raw)) {
+    if (!GATE_KEYS.has(key)) errors.add(`${at}.${key}`, `unknown gate key (allowed: ${[...GATE_KEYS].join(', ')})`);
+  }
+  const gate = {
+    id: requireString(errors, `${at}.id`, raw.id, ''),
+    metric: requireString(errors, `${at}.metric`, raw.metric, ''),
+    comparator: requireString(errors, `${at}.comparator`, raw.comparator, ''),
+  };
+  if (gate.comparator && !COMPARATORS[gate.comparator]) {
+    errors.add(`${at}.comparator`, `must be one of ${Object.keys(COMPARATORS).join(', ')}`);
+  }
+  if (typeof raw.threshold !== 'number' || Number.isNaN(raw.threshold)) {
+    errors.add(`${at}.threshold`, 'must be a number');
+  } else {
+    gate.threshold = raw.threshold;
+  }
+  if (raw.sampleMetric !== undefined) gate.sampleMetric = requireString(errors, `${at}.sampleMetric`, raw.sampleMetric, '');
+  if (raw.minSamples !== undefined) gate.minSamples = requirePositiveInt(errors, `${at}.minSamples`, raw.minSamples, 1);
+  if (raw.minSamples !== undefined && raw.sampleMetric === undefined) {
+    errors.add(`${at}.sampleMetric`, 'is required when minSamples is set, otherwise the sample floor cannot be read');
+  }
+  if (raw.description !== undefined) gate.description = requireString(errors, `${at}.description`, raw.description, '');
+  return gate;
+}
+
+function validateEval(errors, at, raw) {
+  const evalRaw = requireObject(errors, at, raw, {});
+  for (const key of Object.keys(evalRaw)) {
+    if (key !== 'gates') errors.add(`${at}.${key}`, 'unknown eval key (allowed: gates)');
+  }
+  if (evalRaw.gates === undefined) return {};
+  if (!Array.isArray(evalRaw.gates)) {
+    errors.add(`${at}.gates`, 'must be an array of gate objects');
+    return {};
+  }
+  if (evalRaw.gates.length === 0) {
+    errors.add(`${at}.gates`, 'must declare at least one gate; omit `eval.gates` to use the built-in defaults');
+    return {};
+  }
+  const gates = evalRaw.gates.map((gate, i) => validateGate(errors, `${at}.gates[${i}]`, gate)).filter(Boolean);
+  const seen = new Set();
+  for (const gate of gates) {
+    if (!gate.id) continue;
+    if (seen.has(gate.id)) errors.add(`${at}.gates`, `duplicate gate id "${gate.id}"`);
+    seen.add(gate.id);
+  }
+  return { gates };
 }
 
 // Hyperparameters are a whitelist rather than a free-form bag: an unknown key
@@ -202,6 +267,7 @@ export function validateConfig(raw, { baseDir = process.cwd() } = {}) {
     hyper: validateHyper(errors, 'hyper', raw.hyper),
     budget: validateBudget(errors, 'budget', raw.budget),
     trainBudget: requireObject(errors, 'trainBudget', raw.trainBudget, {}),
+    eval: validateEval(errors, 'eval', raw.eval),
   };
 
   return { ok: errors.ok, config: errors.ok ? config : null, errors: errors.list };

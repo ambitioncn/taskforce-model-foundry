@@ -42,6 +42,10 @@ Options:
       --count <n>        Record count (synth/init, default: 160)
       --resume-cancelled Resume a job that an operator cancelled
       --no-resume        Ignore existing job state instead of resuming
+
+Exit codes:
+  0 ok   1 the job ran and did not succeed   2 usage error
+  130 train was cancelled by SIGINT/SIGTERM (resume with --resume-cancelled)
 `;
 
 function parseArgs(argv) {
@@ -153,12 +157,61 @@ async function cmdSynth(opts, baseDir) {
   return 0;
 }
 
+// Operator cancellation from the shell. Node's default SIGINT handling would
+// tear the process down mid-step and leave the job record saying `running`
+// forever, so `train` installs its own handlers and turns the signal into the
+// cooperative abort the runner already understands: the current step finishes
+// or throws, state is persisted as `cancelled`, and the written checkpoints
+// stay valid input for `--resume-cancelled`. A second signal is taken as "I
+// meant now" and exits immediately, accepting the loss of the in-flight step.
+function installCancelHandlers(controller) {
+  const signals = ['SIGINT', 'SIGTERM'];
+  let armed = true;
+  const handlers = signals.map((name) => {
+    const handler = () => {
+      if (!armed) {
+        console.error(`\n${name} again: exiting now, the in-flight step is lost`);
+        process.exit(130);
+      }
+      armed = false;
+      console.error(`\n${name} received: cancelling after the current step, checkpoints are kept`);
+      controller.abort(new Error(`operator cancelled with ${name}`));
+    };
+    process.on(name, handler);
+    return [name, handler];
+  });
+  return () => { for (const [name, handler] of handlers) process.off(name, handler); };
+}
+
 async function cmdTrain(opts, baseDir) {
   const { file, config } = await loadConfig({ file: opts.config ?? null, baseDir });
-  const { job, artifacts } = await train({
-    config, baseDir, jobId: opts.job ?? null, resume: opts.resume, resumeCancelled: opts.resumeCancelled,
-  });
+  const controller = new AbortController();
+  const disarm = installCancelHandlers(controller);
+  let job; let artifacts;
+  try {
+    ({ job, artifacts } = await train({
+      config, baseDir, jobId: opts.job ?? null, resume: opts.resume, resumeCancelled: opts.resumeCancelled,
+      signal: controller.signal,
+    }));
+  } catch (err) {
+    // The runner persists `cancelled` and then rethrows, so a cancellation
+    // arrives here as an exception even though the job record is intact. A
+    // stack trace would read like a crash; report the durable state instead.
+    if (err?.name !== 'JobCancelledError' && err?.code !== 'JOB_CANCELLED') throw err;
+    const jobId = opts.job ?? `train-${config.project}`;
+    const record = await status({ config, baseDir, jobId });
+    out(opts, { configFile: file, job: record.state, cancelled: true }, [
+      `job ${jobId}: ${record.state?.state ?? 'cancelled'}`,
+      `steps: ${stepNames(record.state?.completedSteps).join(' -> ') || '(none)'}`,
+      `cancelled: ${err.message}`,
+      `resume with: tmf train --config ${file} --job ${jobId} --resume-cancelled`,
+    ]);
+    return 130;
+  } finally {
+    disarm();
+  }
   const ok = job.state === 'succeeded';
+  const cancelled = job.state === 'cancelled';
   out(opts, { configFile: file, job, artifacts }, [
     `job ${job.jobId}: ${job.state}`,
     `steps: ${stepNames(job.completedSteps).join(' -> ') || '(none)'}`,
@@ -166,8 +219,14 @@ async function cmdTrain(opts, baseDir) {
       `base checkpoint: ${artifacts.baseCheckpoint}`,
       `${artifacts.adapterCheckpoint ? 'adapter' : 'tuned'} checkpoint: ${artifacts.adapterCheckpoint ?? artifacts.tunedCheckpoint}`,
       `training steps: ${artifacts.metrics?.steps ?? '?'}  parameter L2 delta: ${artifacts.metrics?.parameterL2Delta ?? '?'}`,
+    ] : cancelled ? [
+      `cancelled: ${job.error?.message ?? 'operator cancelled'}`,
+      `resume with: tmf train --config ${file} --job ${job.jobId} --resume-cancelled`,
     ] : [`error: ${job.error?.message ?? 'see audit log'}`]),
   ]);
+  // A cancelled job is not a failed check: 130 keeps it distinguishable from
+  // the exit 1 that means "the job ran and did not succeed".
+  if (cancelled) return 130;
   return ok ? 0 : 1;
 }
 

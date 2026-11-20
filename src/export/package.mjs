@@ -7,7 +7,7 @@
 // people copy around, and a bundle on disk is a claim of improvement.
 
 import path from 'node:path';
-import { copyFile } from 'node:fs/promises';
+import { copyFile, readFile, readdir } from 'node:fs/promises';
 import { ensureDir, writeJson, writeFileAtomic, exists } from '../core/fsx.mjs';
 import { sha256File, sha256Json, stableStringify } from '../core/hash.mjs';
 
@@ -175,6 +175,71 @@ Rollback is complete when the served checksum matches \`weights/base.json\` in
  * Requires an evaluation report that passed its gates; see `assertDeliverable`.
  * Returns the manifest, the per-file checksums, and a bundle digest.
  */
+
+// Depth-bounded, extension-filtered copy of a weight directory into the bundle.
+// The same filter the `hf-peft` fingerprint uses, so what gets embedded is what
+// identifies the checkpoint.
+const EMBED_EXTENSIONS = ['.safetensors', '.bin', '.pt', '.json', '.model', '.txt'];
+const EMBED_MAX_DEPTH = 3;
+const EMBED_MAX_BYTES = 512 * 1024 * 1024;
+
+async function copyWeightTree(from, to, { depth = 0, budget } = {}) {
+  const copied = [];
+  let entries;
+  try {
+    entries = await readdir(from, { withFileTypes: true });
+  } catch {
+    return copied;
+  }
+  for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    const src = path.join(from, entry.name);
+    if (entry.isDirectory()) {
+      if (depth >= EMBED_MAX_DEPTH) continue;
+      const nested = await copyWeightTree(src, path.join(to, entry.name), { depth: depth + 1, budget });
+      for (const rel of nested) copied.push(path.join(entry.name, rel));
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (!EMBED_EXTENSIONS.includes(path.extname(entry.name))) continue;
+    const buf = await readFile(src);
+    budget.bytes += buf.length;
+    if (budget.bytes > EMBED_MAX_BYTES) {
+      throw new Error(`exportModel: embedded weights exceed the ${EMBED_MAX_BYTES} byte bundle limit`);
+    }
+    await ensureDir(to);
+    await writeFileAtomic(path.join(to, entry.name), buf);
+    copied.push(entry.name);
+  }
+  return copied;
+}
+
+async function embedExternalWeights({ pointerFile, root, role }) {
+  let payload;
+  try {
+    payload = JSON.parse(await readFile(pointerFile, 'utf8'));
+  } catch {
+    // Not a JSON pointer (or not readable as one): nothing to embed.
+    return [];
+  }
+  if (payload?.format !== 'tmf-checkpoint-v1') return [];
+  const dir = payload.adapterDir ?? payload.dir ?? null;
+  if (!dir || !(await exists(dir))) return [];
+  const rel = `weights/${role}-weights`;
+  const budget = { bytes: 0 };
+  const copied = await copyWeightTree(dir, path.join(root, rel), { budget });
+  const files = [];
+  for (const name of copied) {
+    const to = `${rel}/${name.split(path.sep).join('/')}`;
+    files.push({
+      path: to,
+      role: `${role}-weights`,
+      sha256: await sha256File(path.join(root, to)),
+      source: path.join(dir, name),
+    });
+  }
+  return files;
+}
+
 export async function exportModel({
   outDir,
   artifacts,
@@ -207,6 +272,17 @@ export async function exportModel({
     const dest = path.join(root, copy.to);
     await copyFile(copy.from, dest);
     files.push({ path: copy.to, role: copy.role, sha256: await sha256File(dest), source: copy.from });
+  }
+  // A `hf-peft` checkpoint file is a *pointer*: it names a local model dir and
+  // an adapter dir rather than carrying weights. Copying only the pointer would
+  // produce a package that cannot be reloaded anywhere else, so the referenced
+  // weight directory is embedded next to it and every embedded file is hashed
+  // into the manifest. Builtin-js checkpoints carry their own weights and are
+  // untouched by this.
+  for (const copy of copies) {
+    if (!copy.to.startsWith('weights/')) continue;
+    const embedded = await embedExternalWeights({ pointerFile: copy.from, root, role: copy.role });
+    for (const entry of embedded) files.push(entry);
   }
   if (!evalReport.reportFile) {
     const dest = path.join(root, 'eval-report.json');

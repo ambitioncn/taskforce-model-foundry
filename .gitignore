@@ -9,3 +9,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Local training dependencies and verification receipts
+.tmf-venv/
+docs/reports/*
+!docs/reports/gap-closure-final-report.md

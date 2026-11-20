@@ -16,7 +16,7 @@ import { Rng } from '../../core/rng.mjs';
 import { TransformerModel, snapshotParams, l2Delta, DEFAULT_MODEL_CONFIG, DEFAULT_LORA_CONFIG } from '../../model/transformer.mjs';
 import { Tokenizer } from '../../model/tokenizer.mjs';
 import { AdamW, lrSchedule, DEFAULT_OPTIMIZER_CONFIG } from '../optimizer.mjs';
-import { makeBatches, countTokens } from '../dataset.mjs';
+import { makeBatches, countTokens, encodeRecords } from '../dataset.mjs';
 
 export const CHECKPOINT_FORMAT = 'tmf-checkpoint-v1';
 
@@ -75,6 +75,9 @@ const backend = {
     // optimizer loop (see trainableParams below), so full-finetune is a real
     // capability here, not an alias we reject at the config boundary.
     modes: ['pretrain', 'lora', 'full-finetune'],
+    // This backend owns no tokenizer of its own: the training job builds the
+    // vocabulary from the data split and hands it in. See prepareDataset().
+    ownsTokenizer: false,
     frameworks: ['builtin-autograd'],
     devices: ['cpu'],
     supportsResume: true,
@@ -90,6 +93,15 @@ const backend = {
       reason: 'bundled pure-JavaScript trainer; no external dependency',
       details: { node: process.version, deps: [] },
     };
+  },
+
+  // Dataset preparation is part of the backend contract so the training job
+  // does not have to know whether ids come from a job-built vocabulary (here)
+  // or from the model's own tokenizer (hf-peft). Both return the same shape.
+  prepareDataset({ handle, records, maxSeqLen = 96 } = {}) {
+    if (!handle?.tokenizer) throw new Error('builtin-js prepareDataset() requires a handle with a tokenizer');
+    const { examples, skipped } = encodeRecords(records ?? [], handle.tokenizer, { maxSeqLen });
+    return { examples, skipped, tokens: countTokens(examples), tokenizer: 'job-built', vocabSize: handle.tokenizer.size };
   },
 
   async createModel({ modelConfig = {}, tokenizer, seed = 1 } = {}) {

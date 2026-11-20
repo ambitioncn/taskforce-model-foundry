@@ -30,6 +30,7 @@
     "scripts/e2e-demo.sh",
     "README.md",
     "package.json",
+    "!docs/reports",
     "!**/__pycache__",
     "!**/*.pyc"
   ],

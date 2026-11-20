@@ -182,6 +182,50 @@ Backends advertise which modes they accept, and the train job refuses the rest
 $ tmf backends
 ```
 
+### What `hf-peft` actually does, and what it does not
+
+`hf-peft` runs `src/train/backends/hf_peft_runner.py` as a local subprocess
+against a model already on disk. It is a local-execution backend: HF offline
+mode is forced, so a missing local model fails instead of downloading one.
+Capabilities are reported in three states, and the third state is never
+dressed up as the first.
+
+| capability | state | evidence / limit |
+| --- | --- | --- |
+| LoRA train on CPU, loss history, weight movement | measured | `scripts/hf-peft-e2e.mjs` reports `firstLoss`, `finalLoss` and a non-zero `parameterL2Delta` |
+| `full-finetune` mode (all weights trainable) | measured | same script, `train_full_finetune` step |
+| checkpoint save, reload, independent re-evaluation | measured | `saveModel` → `loadModel` → `evaluate` in a fresh process, `adapterLoaded: true` |
+| baseline vs tuned evaluation | measured | two separate `evaluate()` processes, not two reads of one training log |
+| greedy/sampled generation | measured | `generate()` returns the decoded continuation, same shape as `builtin-js` |
+| resume from a trainer checkpoint | measured, step-coarse | resumes at the last `checkpoint-<step>` dir; steps after it are replayed, not recovered |
+| cancellation | measured, destructive | `SIGKILL` to the worker. In-flight work is lost; only written checkpoints survive |
+| memory bound (`maxMemoryMb`) | measured | `RLIMIT_AS` on the worker. Exceeding it terminates the process (`BACKEND_MEMORY_LIMIT`). A bound below the framework's own footprint fails at import, not mid-step — it is a cap, not a guarantee that a given job fits |
+| CPU-seconds bound (`maxCpuSeconds`), thread pin | measured | `RLIMIT_CPU` and thread env pinning on the worker |
+| step / wall-clock budget | measured, cooperative | checked between steps by a `Trainer` callback, never mid-kernel |
+| export of an `hf-peft` adapter | measured | `exportModel()` now embeds the directory a pointer checkpoint references (`weights/<role>-weights/`, extension-filtered, depth-bounded, 512 MB cap) and hashes every embedded file into the manifest, so the bundle carries the adapter bytes. The *base* model is still referenced by `modelId`, not copied: a consumer needs the same local base model (`test/export.test.mjs`) |
+| `fingerprint(handle)` (same contract as `builtin-js`) | measured | synchronous sha256 over the sorted weight/config files of the model and adapter dirs plus `modelId` and `mode`. Path-independent: moving a checkpoint dir keeps the digest, changing one weight byte changes it (`test/train-hf-peft.test.mjs`, runs without Python) |
+| `train()` with in-memory `examples` (same parameter shape as `builtin-js`) | measured | the records are materialized to `train-examples.jsonl` under the run's `outDir`; `examplesFile` still works. Verified by `scripts/g12-contract-verify.mjs` (8 real CPU steps, non-zero `parameterL2Delta`) |
+| `tmf train` job orchestration with `hf-peft` | measured | the tokenizer-ownership change landed: `capabilities.ownsTokenizer` plus `prepareDataset()` lets the job hand raw text to the Python worker instead of builtin token ids, so `train` -> `status` -> `evaluate` -> `export` all run on `hf-peft` from the CLI (`docs/reports/g12d-cli-e2e-evidence.json`) |
+| operator cancel from the CLI (`Ctrl-C` / `SIGTERM`) | measured, cooperative at job-step granularity | `tmf train` installs SIGINT/SIGTERM handlers that abort the job's `AbortSignal`; the job finishes writing durable state, prints the completed steps and the exact `--resume-cancelled` command, and exits **130**. The signal is observed between job steps (and between training steps via the budget callback), so the step in flight is abandoned, not suspended. A second signal exits immediately and says so. Measured on jobs `g12d-cancel4` / `g12d-cancel5` (`docs/reports/g12d-cancel-resume-evidence.json`) |
+| resume after cancel (`tmf train --resume-cancelled`) | measured, job-step granular | re-runs only the job steps that have no durable receipt. `g12d-cancel4` cancelled after `data`,`base` then resumed `train`,`finalize` to `succeeded` in 15s against ~40s for the same config cold. It is **not** training-step resume: a cancelled `train` step restarts from the last trainer checkpoint, and on this fixture 240 LoRA steps take 0.883s of wall clock while Python startup and model load dominate, so there is no practical window to land a signal inside the step loop |
+| forced/immediate abort of a running job | **not supported** | cancellation is cooperative at the orchestration level. The CLI does `SIGKILL` the Python worker, but there is no guarantee of bounded-latency abort for an arbitrary backend step, and no rollback of partial writes beyond the durable step receipts |
+| CUDA execution | **unverified** | the code path exists and `devices` reports `cuda` when torch sees it; this project has only exercised CPU |
+| bf16 / fp16 precision | **not supported** | the runner trains in float32 only |
+| filesystem / network isolation | **not supported** | `isolation: "process-rlimit"` bounds resources, it is not a sandbox |
+| multi-GPU, distributed, or hosted training | **not supported** | out of scope: no paid compute, no egress |
+
+Verify the claim rather than trusting the table:
+
+```bash
+.tmf-venv/bin/python scripts/make-tiny-hf-fixture.py .tmf-run/fixtures/tiny-llama .tmf-run/fixtures/synth.jsonl
+TMF_PYTHON=$PWD/.tmf-venv/bin/python node scripts/hf-peft-e2e.mjs
+```
+
+The fixture is a randomly initialised 2-layer model with a word-level
+tokenizer and synthetic data: no downloads, no accounts, no paid compute. When
+the python stack or the fixture is absent, `test/train-hf-peft.test.mjs` skips
+with the concrete reason instead of asserting against a mock.
+
 Ask for a mode a backend does not support and the job fails fast with
 `backend "<id>" does not support mode "<mode>"` (`src/jobs/train.mjs`), so a
 typo costs you a second, not an afternoon.

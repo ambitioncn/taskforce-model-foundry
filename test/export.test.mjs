@@ -166,3 +166,44 @@ test('exportModel inlines an eval report that has no file on disk', async () => 
   const parsed = JSON.parse(await readFile(path.join(result.outDir, 'eval-report.json'), 'utf8'));
   assert.equal(parsed.verdict.status, 'passed');
 });
+
+test('exportModel embeds the weight directory a hf-peft pointer checkpoint references', async () => {
+  const { dir, artifacts } = await fixture();
+  // A hf-peft checkpoint is a pointer: the weights live in a directory.
+  const adapterDir = path.join(dir, 'adapter-weights');
+  await mkdir(path.join(adapterDir, 'nested'), { recursive: true });
+  await writeFile(path.join(adapterDir, 'adapter_model.safetensors'), 'real-adapter-bytes');
+  await writeFile(path.join(adapterDir, 'adapter_config.json'), JSON.stringify({ r: 4 }));
+  await writeFile(path.join(adapterDir, 'optimizer.pt.tmp'), 'ignored-by-extension');
+  await writeFile(path.join(adapterDir, 'nested', 'extra.bin'), 'nested-bytes');
+  await writeFile(artifacts.adapterCheckpoint, JSON.stringify({
+    format: 'tmf-checkpoint-v1', backend: 'hf-peft', kind: 'adapter', modelId: path.join(dir, 'model'), adapterDir, mode: 'lora',
+  }));
+
+  const result = await exportModel({
+    outDir: path.join(dir, 'hf'),
+    artifacts,
+    evalReport: passedReport(),
+    config: { project: 'demo', mode: 'adapter', backend: 'hf-peft' },
+  });
+
+  const embedded = result.manifest.files.filter((f) => f.role === 'adapter-weights').map((f) => f.path).sort();
+  assert.deepEqual(embedded, [
+    'weights/adapter-weights/adapter_config.json',
+    'weights/adapter-weights/adapter_model.safetensors',
+    'weights/adapter-weights/nested/extra.bin',
+  ], 'weight files are embedded, non-weight files are not');
+  // Self-contained: the embedded bytes are present in the bundle and hashed.
+  const bytes = await readFile(path.join(result.outDir, 'weights/adapter-weights/adapter_model.safetensors'), 'utf8');
+  assert.equal(bytes, 'real-adapter-bytes');
+  const entry = result.manifest.files.find((f) => f.path === 'weights/adapter-weights/adapter_model.safetensors');
+  assert.equal(entry.sha256, createHash('sha256').update('real-adapter-bytes').digest('hex'));
+});
+
+test('exportModel leaves a builtin-js checkpoint untouched (no phantom weight dirs)', async () => {
+  const { dir, artifacts } = await fixture();
+  const result = await exportModel({
+    outDir: path.join(dir, 'builtin-only'), artifacts, evalReport: passedReport(), config: { project: 'demo', mode: 'adapter' },
+  });
+  assert.equal(result.manifest.files.some((f) => String(f.role).endsWith('-weights')), false);
+});

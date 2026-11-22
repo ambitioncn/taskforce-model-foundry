@@ -246,7 +246,7 @@ export async function exportModel({
   evalReport,
   config = null,
   name = config?.project ?? 'taskforce-model',
-  version = '0.1.0',
+  version = '0.2.0',
   toolkitVersion = null,
   clock = () => new Date().toISOString(),
 }) {

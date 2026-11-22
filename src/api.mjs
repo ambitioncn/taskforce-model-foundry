@@ -332,7 +332,7 @@ export async function exportModel({
     evalReport: report,
     config: resolved,
     name: resolved.project,
-    version: version ?? '0.1.0',
+    version: version ?? VERSION,
     toolkitVersion: VERSION,
   });
   return { artifacts: resolvedArtifacts, report, bundle };

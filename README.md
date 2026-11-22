@@ -22,8 +22,8 @@ node bin/tmf.mjs train -C /tmp/my-foundry --job first
 node bin/tmf.mjs status first -C /tmp/my-foundry
 ```
 
-This release is distributed as source on GitHub; an npm registry release has not
-been published. The built-in CPU backend needs no npm dependencies.
+Versioned releases are available on GitHub and npm. The built-in CPU backend
+needs no npm dependencies; HF/PEFT requires a separate Python environment.
 
 See the full walkthrough in **[docs/tutorial.md](docs/tutorial.md)**, the host-side
 contract in **[docs/integration.md](docs/integration.md)**, or watch the

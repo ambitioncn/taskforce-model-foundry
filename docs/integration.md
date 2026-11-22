@@ -18,13 +18,13 @@ The package has **zero runtime dependencies** and needs Node.js >= 20
 network.
 
 ```bash
-# from a registry (once published)
+# from the npm registry
 npm i taskforce-model-foundry
 
 # from a local tarball, which is how the install path was verified
-npm pack                     # -> taskforce-model-foundry-0.1.0.tgz
+npm pack                     # -> taskforce-model-foundry-0.2.0.tgz
 cd /path/to/host
-npm i /path/to/taskforce-model-foundry-0.1.0.tgz
+npm i /path/to/taskforce-model-foundry-0.2.0.tgz
 ```
 
 The install provides one bin, `tmf` (`node_modules/.bin/tmf`), and the

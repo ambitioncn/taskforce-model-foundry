@@ -2,7 +2,7 @@
   "id": "taskforce-model-foundry",
   "name": "Taskforce Model Foundry",
   "description": "Taskforce Model Foundry tools (contract v1).",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "configSchema": {
     "type": "object",
     "properties": {},

@@ -20,10 +20,11 @@ export const PARAM_SCHEMA = {
   gates: { type: 'string', description: 'Evaluation gate expression.' },
   reportFile: { type: 'string', description: 'Where to write the evaluation report.' },
   maxNewTokens: { type: 'number', description: 'Generation budget per eval sample.' },
-  background: { type: 'boolean', description: 'Return a durable request id while evaluation runs beyond the tool RPC limit.' },
+  background: { type: 'boolean', description: 'Run training or evaluation in an independent worker and return a durable request id.' },
   retry: { type: 'boolean', description: 'Retry the same failed or interrupted background request; never duplicates a running request.' },
-  requestId: { type: 'string', description: 'Background evaluation request id returned by tmf_evaluate.' },
+  requestId: { type: 'string', description: 'Background request id returned by tmf_train or tmf_evaluate.' },
   evalReport: { type: 'string', description: 'Evaluation report consumed by export.' },
+  qualityReport: { type: 'string', description: 'Predeclared external quality evidence report consumed by export.' },
   version: { type: 'string', description: 'Export version label.' },
   evaluateIfMissing: { type: 'boolean', description: 'Run evaluation when no report exists.' },
 };

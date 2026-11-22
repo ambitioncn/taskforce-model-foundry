@@ -73,15 +73,30 @@ function assignStratum(records, cfg) {
 
 export function splitRecords(records, config = {}) {
   const cfg = { ...DEFAULT_SPLIT_CONFIG, ...config };
-  const total = cfg.train + cfg.validation + cfg.holdout;
-  if (Math.abs(total - 1) > 1e-6) {
-    throw new Error(`split ratios must sum to 1, got ${total} (train=${cfg.train}, validation=${cfg.validation}, holdout=${cfg.holdout})`);
+  const fixed = cfg.datasetAssignments;
+  if (fixed !== undefined && (fixed === null || typeof fixed !== 'object' || Array.isArray(fixed))) {
+    throw new Error('split.datasetAssignments must map dataset names to train, validation or holdout');
   }
-  for (const name of SPLIT_NAMES) {
-    if (cfg[name] < 0) throw new Error(`split ratio "${name}" must not be negative`);
+  if (!fixed) {
+    const total = cfg.train + cfg.validation + cfg.holdout;
+    if (Math.abs(total - 1) > 1e-6) {
+      throw new Error(`split ratios must sum to 1, got ${total} (train=${cfg.train}, validation=${cfg.validation}, holdout=${cfg.holdout})`);
+    }
+    for (const name of SPLIT_NAMES) {
+      if (cfg[name] < 0) throw new Error(`split ratio "${name}" must not be negative`);
+    }
   }
   const splits = { train: [], validation: [], holdout: [] };
-  if (cfg.stratify) {
+  if (fixed) {
+    for (const record of records) {
+      const source = record.source?.dataset;
+      const name = fixed[source];
+      if (!SPLIT_NAMES.includes(name)) {
+        throw new Error(`split.datasetAssignments has no valid assignment for dataset "${source}"`);
+      }
+      splits[name].push({ ...record, split: name, stratum: splitStratum(record) });
+    }
+  } else if (cfg.stratify) {
     const strata = new Map();
     for (const record of records) {
       const stratum = splitStratum(record);
@@ -104,7 +119,7 @@ export function splitRecords(records, config = {}) {
   }
   // A holdout with no supervised pair cannot produce an exact-match number at
   // all, which is a silent hole in evaluation rather than a bad score.
-  if (cfg.requireScorableHoldout && cfg.holdout > 0) {
+  if (cfg.requireScorableHoldout && (fixed || cfg.holdout > 0)) {
     const pairsAvailable = records.some((r) => splitStratum(r) === 'pair');
     const pairsHeldOut = splits.holdout.some((r) => splitStratum(r) === 'pair');
     if (pairsAvailable && !pairsHeldOut) {
@@ -114,7 +129,7 @@ export function splitRecords(records, config = {}) {
     const scorable = splits.holdout.filter((r) => splitStratum(r) === 'pair').length;
     if (pairsAvailable && scorable < minScorable) {
       const pairs = records.filter((r) => splitStratum(r) === 'pair').length;
-      const needed = Math.ceil(minScorable / cfg.holdout);
+      const needed = fixed ? minScorable : Math.ceil(minScorable / cfg.holdout);
       throw new Error(
         `holdout has ${scorable} scorable pair(s), below the minimum ${minScorable}: `
         + `the corpus carries ${pairs} supervised pair(s) and a ${cfg.holdout} holdout share, `

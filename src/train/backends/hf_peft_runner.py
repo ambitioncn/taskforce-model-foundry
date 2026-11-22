@@ -98,10 +98,32 @@ def build_model(spec, torch, want_training):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model_id = spec["modelId"]
+    hf = spec.get("hf") or {}
     tok = AutoTokenizer.from_pretrained(model_id, local_files_only=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token or tok.unk_token
-    model = AutoModelForCausalLM.from_pretrained(model_id, local_files_only=True)
+    load_kwargs = {"local_files_only": True}
+    if hf.get("loadIn4Bit"):
+        from transformers import BitsAndBytesConfig
+
+        if os.environ.get("TMF_DEVICE", "cpu") != "cuda":
+            raise ValueError("4-bit model execution requires TMF_DEVICE=cuda")
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=hf.get("quantType", "nf4"),
+            bnb_4bit_use_double_quant=bool(hf.get("doubleQuant", True)),
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        load_kwargs["device_map"] = {"": 0}
+    if hf.get("dtype") == "bfloat16":
+        load_kwargs["dtype"] = torch.bfloat16
+    model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
+    if want_training and hf.get("loadIn4Bit"):
+        from peft import prepare_model_for_kbit_training
+
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=bool(hf.get("gradientCheckpointing", False))
+        )
     adapter = spec.get("adapterDir")
     mode = spec.get("mode", "lora")
     peft_info = {"mode": mode, "adapterLoaded": False}
@@ -125,7 +147,25 @@ def build_model(spec, torch, want_training):
             ),
         )
     model.config.use_cache = False if want_training else True
+    if hasattr(model.config, "text_config"):
+        model.config.text_config.use_cache = not want_training
     return tok, model, peft_info
+
+
+def place_model(model, device, spec):
+    # transformers/bitsandbytes dispatches 4-bit modules during loading and
+    # deliberately rejects a later .to() on quantized modules.
+    if not (spec.get("hf") or {}).get("loadIn4Bit"):
+        model.to(device)
+
+
+def model_inputs(model, ids):
+    import torch
+
+    inputs = {"input_ids": ids}
+    if getattr(model.config, "model_type", None) == "gemma4":
+        inputs["mm_token_type_ids"] = torch.zeros_like(ids)
+    return inputs
 
 
 def trainable_snapshot(model, torch):
@@ -151,6 +191,7 @@ def op_train(spec):
     )
 
     device = selected_device(torch)
+    hf = spec.get("hf") or {}
     torch.set_num_threads(int(spec.get("threads", 1) or 1))
     torch.manual_seed(int(spec.get("seed", 1)))
     started = time.time()
@@ -190,6 +231,16 @@ def op_train(spec):
         dataloader_num_workers=0,
         disable_tqdm=True,
     )
+    if hf:
+        args_kwargs.update(
+            bf16=hf.get("dtype") == "bfloat16" and device.type == "cuda",
+            gradient_checkpointing=bool(hf.get("gradientCheckpointing", False)),
+            gradient_accumulation_steps=int(hf.get("gradientAccumulationSteps", 1)),
+            lr_scheduler_type=hf.get("lrScheduler", "linear"),
+            warmup_steps=int(hf.get("warmupSteps", 0)),
+            optim=hf.get("optimizer", "adamw_torch"),
+            max_grad_norm=float(hf.get("maxGradNorm", 1.0)),
+        )
     if save_steps > 0:
         args_kwargs["save_steps"] = save_steps
     # TrainingArguments gains and drops keyword arguments between transformers
@@ -201,7 +252,19 @@ def op_train(spec):
     supported = set(inspect.signature(TrainingArguments.__init__).parameters)
     dropped = sorted(k for k in args_kwargs if k not in supported)
     args = TrainingArguments(**{k: v for k, v in args_kwargs.items() if k in supported})
-    collator = DataCollatorForSeq2Seq(tok, model=model, padding=True, label_pad_token_id=-100)
+    base_collator = DataCollatorForSeq2Seq(tok, model=model, padding=True, label_pad_token_id=-100)
+    token_counts = {"input": 0, "supervised": 0}
+
+    def collator(features):
+        batch = base_collator(features)
+        batch_tokens = int(batch["attention_mask"].sum())
+        if budget.get("maxTokens") is not None and token_counts["input"] + batch_tokens > int(budget["maxTokens"]):
+            raise RuntimeError("TMF_TRAIN_TOKEN_BUDGET_EXCEEDED: next batch would exceed maxTokens")
+        token_counts["input"] += batch_tokens
+        token_counts["supervised"] += int((batch["labels"] != -100).sum())
+        if getattr(model.config, "model_type", None) == "gemma4":
+            batch["mm_token_type_ids"] = torch.zeros_like(batch["input_ids"])
+        return batch
     trainer = Trainer(model=model, args=args, train_dataset=ds, data_collator=collator, callbacks=[BudgetCallback()])
 
     before = trainable_snapshot(model, torch)
@@ -235,7 +298,11 @@ def op_train(spec):
         "trainLossMean": float(result.training_loss) if result and result.training_loss is not None else None,
         "trainableParams": trainable,
         "parameterL2Delta": round(l2_delta(before, after, torch), 8),
-        "tokensSeen": int(sum(len(r["input_ids"]) for r in ds)) * max(1, int(trainer.state.global_step) // max(1, len(ds))),
+        # The collator runs on each batch actually handed to Trainer, so this
+        # is an attempt-level input-token count rather than whole-dataset size.
+        "tokensSeen": token_counts["input"],
+        "supervisedTokensSeen": token_counts["supervised"],
+        "datasetTokens": int(sum(len(r["input_ids"]) for r in ds)),
         "wallClockSeconds": round(time.time() - started, 3),
         "peakRssMb": peak_rss_mb(),
         "stepBudget": int(budget.get("maxSteps", 20)),
@@ -258,7 +325,7 @@ def op_evaluate(spec):
     device = selected_device(torch)
     torch.set_num_threads(int(spec.get("threads", 1) or 1))
     tok, model, peft_info = build_model(spec, torch, want_training=False)
-    model.to(device)
+    place_model(model, device, spec)
     model.eval()
     rows = load_rows(spec["examplesFile"])
     if not rows:
@@ -274,7 +341,7 @@ def op_evaluate(spec):
                 continue
             ids = torch.tensor([enc["input_ids"]], device=device)
             labels = torch.tensor([enc["labels"]], device=device)
-            out = model(input_ids=ids, labels=labels)
+            out = model(**model_inputs(model, ids), labels=labels)
             # Count only supervised positions so the mean is token-weighted.
             counted = int((labels[:, 1:] != -100).sum())
             if counted == 0:
@@ -298,6 +365,71 @@ def op_evaluate(spec):
     })
 
 
+def op_evaluate_bundle(spec):
+    """Score holdout, generate, then score validation with one model load."""
+    import torch
+
+    started = time.time()
+    device = selected_device(torch)
+    torch.set_num_threads(int(spec.get("threads", 1) or 1))
+    tok, model, peft_info = build_model(spec, torch, want_training=False)
+    place_model(model, device, spec)
+    model.eval()
+    max_len = int(spec.get("maxSeqLen", 128))
+    def score(path, required):
+        rows = load_rows(path)
+        if required and not rows:
+            raise ValueError("evaluation needs at least one holdout example")
+        if not rows:
+            return None
+        total_loss = 0.0
+        total_tokens = 0
+        with torch.no_grad():
+            for row in rows:
+                enc = encode_row(tok, row, max_len)
+                if len(enc["input_ids"]) < 2:
+                    continue
+                ids = torch.tensor([enc["input_ids"]], device=device)
+                labels = torch.tensor([enc["labels"]], device=device)
+                out = model(**model_inputs(model, ids), labels=labels)
+                counted = int((labels[:, 1:] != -100).sum())
+                if counted == 0:
+                    continue
+                total_loss += float(out.loss) * counted
+                total_tokens += counted
+        if total_tokens == 0:
+            raise ValueError("no supervised tokens in evaluation split")
+        loss = total_loss / total_tokens
+        return {"loss": round(loss, 6), "perplexity": round(math.exp(min(loss, 50.0)), 6),
+                "tokens": total_tokens, "examples": len(rows)}
+
+    holdout = score(spec["holdoutFile"], True)
+    prompts = load_rows(spec["promptsFile"])
+    if any(not isinstance(row.get("prompt"), str) for row in prompts):
+        raise ValueError("evaluate_bundle prompts must be strings")
+    texts = []
+    with torch.no_grad():
+        for row in prompts:
+            torch.manual_seed(int(spec.get("seed", 1)))
+            ids = tok(row["prompt"], return_tensors="pt", add_special_tokens=False).to(device)
+            if getattr(model.config, "model_type", None) == "gemma4":
+                ids["mm_token_type_ids"] = torch.zeros_like(ids["input_ids"])
+            out = model.generate(
+                **ids, max_new_tokens=int(spec.get("maxNewTokens", 16)),
+                do_sample=False, temperature=None, pad_token_id=tok.pad_token_id,
+            )
+            new_ids = out[0][ids["input_ids"].shape[1]:]
+            texts.append(tok.decode(new_ids, skip_special_tokens=True))
+    validation = score(spec["validationFile"], False)
+    emit({
+        "op": "evaluate_bundle", "holdout": holdout, "validation": validation,
+        "texts": texts, "adapterLoaded": peft_info["adapterLoaded"], "device": device.type,
+        "wallClockSeconds": round(time.time() - started, 3), "peakRssMb": peak_rss_mb(),
+        "peakCudaAllocatedMb": round(torch.cuda.max_memory_allocated() / 1048576, 3) if device.type == "cuda" else None,
+        "limits": spec.get("_appliedLimits"),
+    })
+
+
 def op_generate(spec):
     import torch
 
@@ -305,10 +437,12 @@ def op_generate(spec):
     torch.set_num_threads(int(spec.get("threads", 1) or 1))
     torch.manual_seed(int(spec.get("seed", 1)))
     tok, model, peft_info = build_model(spec, torch, want_training=False)
-    model.to(device)
+    place_model(model, device, spec)
     model.eval()
     prompt = spec.get("prompt", "")
     ids = tok(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+    if getattr(model.config, "model_type", None) == "gemma4":
+        ids["mm_token_type_ids"] = torch.zeros_like(ids["input_ids"])
     temperature = float(spec.get("temperature", 0.0))
     started = time.time()
     with torch.no_grad():
@@ -338,7 +472,7 @@ def op_generate_batch(spec):
     device = selected_device(torch)
     torch.set_num_threads(int(spec.get("threads", 1) or 1))
     tok, model, peft_info = build_model(spec, torch, want_training=False)
-    model.to(device)
+    place_model(model, device, spec)
     model.eval()
     rows = load_rows(spec["promptsFile"])
     if not rows or any(not isinstance(row.get("prompt"), str) for row in rows):
@@ -353,6 +487,8 @@ def op_generate_batch(spec):
             # behavior for sampled generation as well as greedy decoding.
             torch.manual_seed(int(spec.get("seed", 1)))
             ids = tok(row["prompt"], return_tensors="pt", add_special_tokens=False).to(device)
+            if getattr(model.config, "model_type", None) == "gemma4":
+                ids["mm_token_type_ids"] = torch.zeros_like(ids["input_ids"])
             out = model.generate(
                 **ids,
                 max_new_tokens=max_new_tokens,
@@ -375,7 +511,8 @@ def op_generate_batch(spec):
     })
 
 
-OPS = {"train": op_train, "evaluate": op_evaluate, "generate": op_generate, "generate_batch": op_generate_batch}
+OPS = {"train": op_train, "evaluate": op_evaluate, "evaluate_bundle": op_evaluate_bundle,
+       "generate": op_generate, "generate_batch": op_generate_batch}
 
 
 def main():

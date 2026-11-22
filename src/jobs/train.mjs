@@ -12,7 +12,7 @@
 // so "resume" is the same code path as "load a checkpoint someone else wrote".
 
 import path from 'node:path';
-import { runJob, JobCancelledError } from './runner.mjs';
+import { runJob, JobCancelledError, BudgetExceededError } from './runner.mjs';
 import { runDataPipeline } from '../data/pipeline.mjs';
 import { buildTokenizer, encodeRecords } from '../train/dataset.mjs';
 import { ensureDir, readJsonl, writeJson } from '../core/fsx.mjs';
@@ -64,6 +64,7 @@ export async function runTrainingJob({
   modelConfig = {},
   hyper = {},
   trainBudget = {},
+  externalQuality = null,
   mode = DEFAULT_TRAIN_JOB_OPTIONS.mode,
   seed = DEFAULT_TRAIN_JOB_OPTIONS.seed,
   maxVocab = DEFAULT_TRAIN_JOB_OPTIONS.maxVocab,
@@ -106,6 +107,7 @@ export async function runTrainingJob({
     seed,
     maxVocab,
     maxSeqLen,
+    ...(externalQuality ? { externalQuality } : {}),
   };
 
   const steps = [
@@ -197,20 +199,40 @@ export async function runTrainingJob({
           baseFingerprint: beforeFingerprint,
         });
 
-        const trained = await backend.train({
-          handle,
-          examples,
-          examplesFile: prepared.examplesFile ?? null,
-          mode,
-          hyper,
-          budget: trainBudget,
-          seed,
-          outDir: modelDir,
-          signal,
-          resume: null,
-          hooks: { onStep: makeStepHook({ signal, audit, budget: jobBudget, auditEveryStep }) },
-        });
+        let trained;
+        try {
+          trained = await backend.train({
+            handle,
+            examples,
+            examplesFile: prepared.examplesFile ?? null,
+            mode,
+            hyper,
+            budget: backend.id === 'hf-peft' ? {
+              ...trainBudget,
+              maxTokens: jobBudget.limits.maxTokens == null ? null : jobBudget.limits.maxTokens - jobBudget.usage.tokens,
+            } : trainBudget,
+            seed,
+            outDir: modelDir,
+            signal,
+            resume: null,
+            hooks: { onStep: makeStepHook({ signal, audit, budget: jobBudget, auditEveryStep }) },
+          });
+        } catch (err) {
+          if (err?.code === 'BACKEND_TOKEN_BUDGET') {
+            throw new BudgetExceededError(err.message, { limit: 'maxTokens', limitValue: jobBudget.limits.maxTokens });
+          }
+          throw err;
+        }
         const { metrics, history, stopReason } = trained;
+        // HF runs outside Node, so its per-batch count returns at job-step end.
+        // The Python collator already stops before a batch that would exceed
+        // the cap; charging here records the verified consumption durably.
+        if (backend.id === 'hf-peft') {
+          if (!Number.isSafeInteger(metrics.tokensSeen) || metrics.tokensSeen < 0) {
+            throw new Error('hf-peft did not report a valid consumed-token count');
+          }
+          jobBudget.charge({ tokens: metrics.tokensSeen });
+        }
         // A backend may return a moved handle (hf-peft points it at the adapter
         // directory the worker just wrote); saving the pre-train handle would
         // persist a checkpoint that does not reference the trained weights.
@@ -268,6 +290,7 @@ export async function runTrainingJob({
           data: outputs.data,
           base: outputs.base,
           train: outputs.train,
+          ...(externalQuality ? { externalQuality } : {}),
         };
         const manifestFile = path.join(jobDir, 'train-manifest.json');
         await writeJson(manifestFile, manifest);
@@ -299,5 +322,6 @@ export function trainingArtifacts(job) {
     adapterCheckpoint: train.kind === 'adapter' ? train.checkpoint : null,
     tunedCheckpoint: train.kind === 'adapter' ? null : train.checkpoint,
     metrics: train.metrics,
+    externalQuality: job.result.externalQuality ?? null,
   };
 }

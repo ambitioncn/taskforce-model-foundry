@@ -15,6 +15,7 @@ if (await sha256File(request.configFile) !== request.configDigest) {
 }
 process.env.TMF_DEVICE = request.device;
 process.env.TMF_PYTHON = request.pythonBin;
+if (request.hfMaxMemoryMb !== null) process.env.TMF_HF_MAX_MEMORY_MB = request.hfMaxMemoryMb;
 // The HF backend uses cwd for its transient spec/output directories. Keep
 // separate background requests from racing on those files.
 process.chdir(path.dirname(statusFile));

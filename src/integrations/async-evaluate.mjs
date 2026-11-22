@@ -13,9 +13,9 @@ import { sha256File, sha256Json } from '../core/hash.mjs';
 const workerFile = fileURLToPath(new URL('./async-evaluate-worker.mjs', import.meta.url));
 const execFileAsync = promisify(execFile);
 
-function requireJobId(jobId) {
+export function requireJobId(jobId) {
   if (typeof jobId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(jobId) || jobId === '..') {
-    throw new Error('background evaluation requires a safe, explicit jobId');
+    throw new Error('background work requires a safe, explicit jobId');
   }
   return jobId;
 }
@@ -32,18 +32,19 @@ function reportMatches(report, status) {
   return report.reportDigest === sha256Json({ ...report, reportDigest: undefined });
 }
 
-async function launchWorker(requestFile, statusFile, unit, logFile) {
-  if (process.env.TMF_EVAL_LAUNCHER !== 'direct' && process.platform === 'linux') {
+export async function launchBackgroundWorker(workerPath, requestFile, statusFile, unit, logFile) {
+  const launcher = process.env.TMF_BACKGROUND_LAUNCHER ?? process.env.TMF_EVAL_LAUNCHER;
+  if (launcher !== 'direct' && process.platform === 'linux') {
     try {
-      await execFileAsync('systemd-run', ['--user', '--collect', '--unit=' + unit, process.execPath, workerFile, requestFile, statusFile], { timeout: 10000 });
+      await execFileAsync('systemd-run', ['--user', '--collect', '--unit=' + unit, process.execPath, workerPath, requestFile, statusFile], { timeout: 10000 });
       return { launcher: 'systemd', unit, restartDurable: true };
     } catch (err) {
-      if (process.env.TMF_EVAL_LAUNCHER === 'systemd') throw err;
+      if (launcher === 'systemd') throw err;
     }
   }
   const log = await open(logFile, 'a');
   try {
-    const child = spawn(process.execPath, [workerFile, requestFile, statusFile], {
+    const child = spawn(process.execPath, [workerPath, requestFile, statusFile], {
       detached: true, stdio: ['ignore', log.fd, log.fd], env: process.env,
     });
     if (!child.pid) throw new Error('background evaluation worker did not start');
@@ -60,7 +61,11 @@ export async function startBackgroundEvaluation({ baseDir, configFile, jobId, ga
   const output = path.resolve(config.baseDir, reportFile ?? path.join(config.runRootAbsolute, jobId, 'eval-report.json'));
   const device = process.env.TMF_DEVICE ?? 'cpu';
   if (!['cpu', 'cuda'].includes(device)) throw new Error('unsupported TMF_DEVICE=' + device);
-  const request = { configFile: file, configDigest: await sha256File(file), jobId, gates, reportFile: output, maxNewTokens, device, pythonBin: process.env.TMF_PYTHON ?? 'python3' };
+  const request = {
+    configFile: file, configDigest: await sha256File(file), jobId, gates, reportFile: output,
+    maxNewTokens, device, pythonBin: process.env.TMF_PYTHON ?? 'python3',
+    hfMaxMemoryMb: process.env.TMF_HF_MAX_MEMORY_MB ?? null,
+  };
   const requestId = sha256Json(request).slice(0, 24);
   const loc = await location({ baseDir, configFile: file, jobId, requestId });
   await ensureDir(loc.root);
@@ -85,7 +90,7 @@ export async function startBackgroundEvaluation({ baseDir, configFile, jobId, ga
   const status = { requestId, jobId, state: 'queued', attempt, reportFile: output, createdAt: new Date().toISOString(), device };
   await writeJson(loc.statusFile, status);
   try {
-    const launch = await launchWorker(requestFile, loc.statusFile, 'tmf-eval-' + requestId + '-' + attempt, path.join(attemptDir, 'worker.log'));
+    const launch = await launchBackgroundWorker(workerFile, requestFile, loc.statusFile, 'tmf-eval-' + requestId + '-' + attempt, path.join(attemptDir, 'worker.log'));
     const now = await readJsonIfExists(loc.statusFile);
     if (now?.state === 'queued' && now.attempt === attempt) await writeJson(loc.statusFile, { ...now, ...launch });
   } catch (err) {

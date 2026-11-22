@@ -17,6 +17,7 @@ export * as jobs from './jobs/runner.mjs';
 export * as trainJob from './jobs/train.mjs';
 export * as evalJob from './jobs/evaluate.mjs';
 export * as gates from './eval/gates.mjs';
+export * as externalQuality from './eval/external-quality.mjs';
 export * as backends from './train/backends/index.mjs';
 export * as exporter from './export/package.mjs';
 export { exportModel, assertDeliverable, ExportBlockedError, EXPORT_FORMAT } from './export/package.mjs';

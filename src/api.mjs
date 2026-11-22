@@ -17,6 +17,8 @@ import { encodeRecords } from './train/dataset.mjs';
 import { exportModel as packageExport } from './export/package.mjs';
 import { exists, readJson, readJsonl } from './core/fsx.mjs';
 import { VERSION } from './version.mjs';
+import { sha256Json } from './core/hash.mjs';
+import { verifyExternalQuality } from './eval/external-quality.mjs';
 
 export const PRODUCT = 'taskforce-model-foundry';
 const MIN_NODE_MAJOR = 20;
@@ -149,6 +151,7 @@ export async function train({
     modelConfig: resolved.model,
     hyper: resolved.hyper,
     trainBudget: resolved.trainBudget,
+    externalQuality: resolved.eval?.externalQuality ?? null,
     mode: resolved.mode,
     seed: resolved.seed,
     maxVocab: resolved.model.maxVocab,
@@ -267,6 +270,7 @@ export async function evaluate({
       seed: resolved.seed,
       dataDir: resolvedArtifacts.dataDir,
       dataReportFile: resolvedArtifacts.dataReportFile ?? null,
+      externalQualityContractDigest: resolvedArtifacts.externalQuality ? sha256Json(resolvedArtifacts.externalQuality) : null,
     },
     reportFile: file,
     maxNewTokens,
@@ -303,6 +307,7 @@ export async function exportModel({
   jobId = null,
   artifacts = null,
   evalReport = null,
+  qualityReport = null,
   outDir = null,
   version = null,
   evaluateIfMissing = true,
@@ -325,11 +330,30 @@ export async function exportModel({
     assertReportIntegrity(report, { jobId });
     resolvedArtifacts = await resolveArtifacts({ artifacts, config: resolved, jobId });
   }
+  let externalQuality = null;
+  if (resolved.eval?.externalQuality) {
+    if (!resolvedArtifacts.externalQuality || sha256Json(resolvedArtifacts.externalQuality) !== sha256Json(resolved.eval.externalQuality)) {
+      throw new Error('external quality contract was not frozen into this training job; start a new job with the contract predeclared');
+    }
+    if (report.lineage?.externalQualityContractDigest !== sha256Json(resolved.eval.externalQuality)) {
+      throw new Error('technical evaluation is not bound to the predeclared external quality contract');
+    }
+    externalQuality = await verifyExternalQuality({
+      contract: resolved.eval.externalQuality,
+      evidence: qualityReport,
+      artifacts: resolvedArtifacts,
+      evalReport: report,
+      baseDir: resolved.baseDir,
+    });
+  } else if (qualityReport) {
+    throw new Error('qualityReport supplied but eval.externalQuality was not predeclared in the training config');
+  }
   const target = path.resolve(resolved.baseDir, outDir ?? path.join(resolved.runRootAbsolute, resolvedArtifacts.jobId, 'export'));
   const bundle = await packageExport({
     outDir: target,
     artifacts: resolvedArtifacts,
     evalReport: report,
+    externalQuality,
     config: resolved,
     name: resolved.project,
     version: version ?? VERSION,

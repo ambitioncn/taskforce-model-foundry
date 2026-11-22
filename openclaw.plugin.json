@@ -18,6 +18,7 @@
       "tmf_synthesize",
       "tmf_train",
       "tmf_evaluate",
+      "tmf_evaluate_status",
       "tmf_export"
     ]
   }

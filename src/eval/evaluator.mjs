@@ -67,10 +67,22 @@ export async function exactMatchOnRecords(backend, handle, records, { maxNewToke
   let hit = 0;
   const samples = [];
   const predictions = [];
-  for (const record of scorable) {
-    const got = await backend.generate({ handle, prompt: record.prompt, maxNewTokens });
+  const predictionDigests = [];
+  // Backends that own a large model may load it once and generate each prompt
+  // sequentially. The result order and exact-match definition stay identical.
+  const generated = scorable.length && typeof backend.generateBatch === 'function'
+    ? await backend.generateBatch({ handle, prompts: scorable.map((record) => record.prompt), maxNewTokens })
+    : null;
+  if (generated && (!Array.isArray(generated) || generated.length !== scorable.length)) {
+    throw new Error(`generateBatch returned ${generated?.length ?? 'invalid'} result(s) for ${scorable.length} prompt(s)`);
+  }
+  for (let index = 0; index < scorable.length; index += 1) {
+    const record = scorable[index];
+    const got = generated ? generated[index] : await backend.generate({ handle, prompt: record.prompt, maxNewTokens });
+    if (typeof got !== 'string') throw new Error(`generation result ${index} is not a string`);
     if (got === record.completion) hit += 1;
     predictions.push({ predicted: got, expected: record.completion });
+    predictionDigests.push({ record: recordFingerprint(record), output: sha256(got) });
     if (samples.length < sampleLimit) samples.push({ prompt: record.prompt, got, want: record.completion });
   }
   // The gated number stays byte-identical exact match. The three below are
@@ -86,6 +98,7 @@ export async function exactMatchOnRecords(backend, handle, records, { maxNewToke
     normalized: predictions.length ? normalizedExactMatchScore(predictions) : null,
     fields: predictions.length ? fieldAccuracy(predictions) : null,
     characterF1: predictions.length ? characterF1(predictions) : null,
+    predictionDigests,
     samples,
   };
 }

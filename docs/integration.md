@@ -178,7 +178,7 @@ when no Python interpreter is on PATH).
 
 ## 4. Action and tool table
 
-Six actions, six tools, one table. `compute: true` means the call spends real
+Seven actions, seven tools, one table. `compute: true` means the call spends real
 CPU time and writes run artifacts; those are the calls a host should gate.
 
 | OpenClaw action | Hermes tool | Compute | Required | Accepted params |
@@ -187,7 +187,8 @@ CPU time and writes run artifacts; those are the calls a host should gate.
 | `status` | `tmf_status` | no | `jobId` | `jobId`, `configFile`, `auditTail` |
 | `synthesize` | `tmf_synthesize` | yes | — | `outDir`, `seed`, `count`, `profile` |
 | `train` | `tmf_train` | yes | — | `configFile`, `jobId`, `resume`, `resumeCancelled`, `auditEveryStep` |
-| `evaluate` | `tmf_evaluate` | yes | — | `configFile`, `jobId`, `gates`, `reportFile`, `maxNewTokens` |
+| `evaluate` | `tmf_evaluate` | yes | — | `configFile`, `jobId`, `gates`, `reportFile`, `maxNewTokens`, `background`, `retry` |
+| `evaluate_status` | `tmf_evaluate_status` | no | `jobId`, `requestId` | `configFile`, `jobId`, `requestId` |
 | `export` | `tmf_export` | yes | — | `configFile`, `jobId`, `evalReport`, `outDir`, `version`, `evaluateIfMissing` |
 
 **Read-only mount.** `allowCompute: false` keeps the adapter useful for

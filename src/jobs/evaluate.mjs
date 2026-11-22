@@ -87,11 +87,13 @@ export async function runEvaluationJob({
 
   let tuned = null;
   let tunedFingerprint = null;
+  let adapterBaseFingerprint = null;
   if (adapterCheckpoint || tunedCheckpoint) {
     const tunedHandle = adapterCheckpoint
       ? await backend.loadModel({ file: baseCheckpoint, attachAdapter: adapterCheckpoint })
       : await backend.loadModel({ file: tunedCheckpoint });
     tunedFingerprint = backend.fingerprint(tunedHandle);
+    adapterBaseFingerprint = tunedHandle.meta?.baseFingerprint ?? null;
     tuned = await evaluateSplitSet(backend, tunedHandle, { encoded, records, maxNewTokens });
   }
 
@@ -105,6 +107,10 @@ export async function runEvaluationJob({
     startedAt,
     finishedAt: clock(),
     backend: { id: backend.id, label: backend.label ?? null },
+    execution: {
+      device: baseline.holdout.device ?? null,
+      tunedDevice: tuned?.holdout.device ?? null,
+    },
     inputs: {
       baseCheckpoint: baseRef,
       adapterCheckpoint: adapterRef,
@@ -130,16 +136,18 @@ export async function runEvaluationJob({
     },
     lineage: {
       ...lineage,
-      // The builtin fingerprint digests the *base* weights, so for an adapter
-      // run both handles share it -- that equality is the proof the adapter is
-      // bound to this base checkpoint. Adapter bytes are pinned by
-      // inputs.adapterCheckpoint.sha256.
+      // Some backends fingerprint the composed base+adapter handle, so its
+      // digest must differ from the base. Prefer the base fingerprint recorded
+      // in the adapter checkpoint; older backends with no recorded base digest
+      // retain the original shared-fingerprint comparison.
       baseFingerprint: baselineFingerprint,
       tunedFingerprint,
       // Only an adapter run can be "bound to base". A full-parameter tuned
       // checkpoint has no adapter, so reporting false there would read as a
       // broken binding instead of "not applicable".
-      adapterBoundToBase: adapterCheckpoint ? tunedFingerprint === baselineFingerprint : null,
+      adapterBoundToBase: adapterCheckpoint
+        ? (adapterBaseFingerprint ?? tunedFingerprint) === baselineFingerprint
+        : null,
       gateDefinitions: gates.map((g) => ({ id: g.id, metric: g.metric, comparator: g.comparator, threshold: g.threshold })),
       gateDefinitionsDigest: sha256Json(gates),
     },

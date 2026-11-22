@@ -37,7 +37,10 @@ const RESULT_PREFIX = '__TMF_RESULT__';
 
 // Defaults kept small on purpose: this backend is expected to run on a CPU box
 // next to the rest of the toolchain, not on a training cluster.
-const DEFAULT_LIMITS = { maxMemoryMb: 4096, threads: 1, maxSeqLen: 128 };
+// This is a virtual-address-space cap, not resident RAM. Importing CUDA-enabled
+// PyTorch can reserve more than 4 GiB of address space before model loading;
+// keep the explicit caller override for tighter bounded jobs.
+const DEFAULT_LIMITS = { maxMemoryMb: 65536, threads: 1, maxSeqLen: 128 };
 
 function pythonBin() {
   return process.env.TMF_PYTHON || 'python3';
@@ -455,6 +458,17 @@ const backend = {
       trainFile = path.join(outDir, 'train-examples.jsonl');
       await writeFileAtomic(trainFile, `${examples.map((e) => JSON.stringify(e)).join('\n')}\n`);
     }
+    // A cancelled CLI job re-enters the train job-step without an explicit
+    // backend resume argument. Recover only a complete Trainer checkpoint;
+    // anything after that checkpoint is deliberately replayed.
+    if (!resume && fs.existsSync(outDir)) {
+      const checkpoints = fs.readdirSync(outDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && /^checkpoint-\d+$/.test(entry.name))
+        .map((entry) => ({ step: Number(entry.name.slice('checkpoint-'.length)), path: path.join(outDir, entry.name) }))
+        .filter((entry) => fs.existsSync(path.join(entry.path, 'trainer_state.json')))
+        .sort((a, b) => b.step - a.step);
+      resume = checkpoints[0]?.path ?? null;
+    }
     const rendered = await backend.renderTrainingScript({
       handle, examplesFile: trainFile, hyper, budget, outDir, mode, resumeFrom: resume,
     });
@@ -515,6 +529,7 @@ const backend = {
       tokens: payload.tokens,
       examples: payload.examples,
       adapterLoaded: payload.adapterLoaded,
+      device: payload.device,
       backend: backend.id,
       limits: payload.limits,
     };
@@ -543,6 +558,39 @@ const backend = {
     });
     // Same shape as the builtin backend: callers get the decoded continuation.
     return payload.text;
+  },
+
+  async generateBatch({
+    handle, prompts, maxNewTokens = 16, temperature = 0, seed = 1,
+    hyper = {}, budget = {}, signal = null, outDir,
+  } = {}) {
+    const probe = await backend.probe();
+    if (!probe.available) throw unavailable('generate a batch', probe);
+    if (!handle?.modelId) throw new Error('hf-peft generateBatch() requires a handle with modelId');
+    if (!Array.isArray(prompts) || prompts.length === 0 || prompts.some((prompt) => typeof prompt !== 'string')) {
+      throw new Error('hf-peft generateBatch() requires a non-empty array of string prompts');
+    }
+    const dir = outDir ?? path.join(process.cwd(), '.tmf-run', 'hf-peft-gen-batch');
+    await ensureDir(dir);
+    const promptsFile = path.join(dir, 'prompts.jsonl');
+    await writeFileAtomic(promptsFile, `${prompts.map((prompt) => JSON.stringify({ prompt })).join('\n')}\n`);
+    const spec = {
+      modelId: handle.modelId,
+      adapterDir: handle.adapterDir ?? handle.dir ?? null,
+      mode: handle.mode ?? 'lora',
+      promptsFile,
+      maxNewTokens,
+      temperature,
+      seed,
+      ...limitsFrom(budget, hyper),
+    };
+    const { payload } = await runOp('generate_batch', spec, {
+      outDir: dir, timeoutMs: ((budget.maxSeconds ?? 600) + 120) * 1000, signal,
+    });
+    if (!Array.isArray(payload.texts) || payload.texts.length !== prompts.length) {
+      throw new Error(`hf-peft generateBatch returned ${payload.texts?.length ?? 'invalid'} result(s) for ${prompts.length} prompt(s)`);
+    }
+    return payload.texts;
   },
 };
 

@@ -57,6 +57,20 @@ def peak_rss_mb():
     return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 3)
 
 
+def selected_device(torch):
+    requested = os.environ.get("TMF_DEVICE", "cpu")
+    if requested not in ("cpu", "cuda"):
+        raise ValueError(f"unsupported TMF_DEVICE={requested!r}")
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("TMF_DEVICE=cuda requested but CUDA is unavailable")
+    fraction = os.environ.get("TMF_CUDA_MEMORY_FRACTION")
+    if fraction is not None:
+        if requested != "cuda" or not (0 < float(fraction) <= 1):
+            raise ValueError("TMF_CUDA_MEMORY_FRACTION requires CUDA and a value in (0, 1]")
+        torch.cuda.set_per_process_memory_fraction(float(fraction))
+    return torch.device(requested)
+
+
 def load_rows(path):
     rows = []
     with open(path, "r", encoding="utf-8") as fh:
@@ -70,6 +84,11 @@ def load_rows(path):
 def encode_row(tok, row, max_len):
     prompt_ids = tok(row["prompt"], add_special_tokens=False)["input_ids"]
     full_ids = tok(row["prompt"] + row.get("completion", ""), add_special_tokens=False)["input_ids"]
+    # A supervised completion needs an end target. Without EOS the model is
+    # trained to emit the answer prefix but never to stop, while greedy exact
+    # match expects the whole completion and marks every overlong answer wrong.
+    if row.get("completion") and tok.eos_token_id is not None and len(full_ids) < max_len:
+        full_ids.append(tok.eos_token_id)
     full_ids = full_ids[:max_len]
     labels = [-100] * min(len(prompt_ids), len(full_ids)) + full_ids[min(len(prompt_ids), len(full_ids)):]
     return {"input_ids": full_ids, "labels": labels, "attention_mask": [1] * len(full_ids)}
@@ -131,6 +150,7 @@ def op_train(spec):
         TrainingArguments,
     )
 
+    device = selected_device(torch)
     torch.set_num_threads(int(spec.get("threads", 1) or 1))
     torch.manual_seed(int(spec.get("seed", 1)))
     started = time.time()
@@ -166,7 +186,7 @@ def op_train(spec):
         report_to=[],
         save_strategy="steps" if save_steps > 0 else "no",
         seed=int(spec.get("seed", 1)),
-        use_cpu=True,
+        use_cpu=device.type == "cpu",
         dataloader_num_workers=0,
         disable_tqdm=True,
     )
@@ -203,6 +223,8 @@ def op_train(spec):
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     metrics = {
         "backend": "hf-peft",
+        "device": device.type,
+        "peakCudaAllocatedMb": round(torch.cuda.max_memory_allocated() / 1048576, 3) if device.type == "cuda" else None,
         "mode": peft_info["mode"],
         "resumedFrom": resume or None,
         "steps": int(trainer.state.global_step) - (int(trainer.state.global_step) - len(history) if resume else 0),
@@ -233,8 +255,10 @@ def op_train(spec):
 def op_evaluate(spec):
     import torch
 
+    device = selected_device(torch)
     torch.set_num_threads(int(spec.get("threads", 1) or 1))
     tok, model, peft_info = build_model(spec, torch, want_training=False)
+    model.to(device)
     model.eval()
     rows = load_rows(spec["examplesFile"])
     if not rows:
@@ -248,8 +272,8 @@ def op_evaluate(spec):
             enc = encode_row(tok, row, max_len)
             if len(enc["input_ids"]) < 2:
                 continue
-            ids = torch.tensor([enc["input_ids"]])
-            labels = torch.tensor([enc["labels"]])
+            ids = torch.tensor([enc["input_ids"]], device=device)
+            labels = torch.tensor([enc["labels"]], device=device)
             out = model(input_ids=ids, labels=labels)
             # Count only supervised positions so the mean is token-weighted.
             counted = int((labels[:, 1:] != -100).sum())
@@ -267,6 +291,7 @@ def op_evaluate(spec):
         "tokens": total_tokens,
         "examples": len(rows),
         "adapterLoaded": peft_info["adapterLoaded"],
+        "device": device.type,
         "wallClockSeconds": round(time.time() - started, 3),
         "peakRssMb": peak_rss_mb(),
         "limits": spec.get("_appliedLimits"),
@@ -276,12 +301,14 @@ def op_evaluate(spec):
 def op_generate(spec):
     import torch
 
+    device = selected_device(torch)
     torch.set_num_threads(int(spec.get("threads", 1) or 1))
     torch.manual_seed(int(spec.get("seed", 1)))
     tok, model, peft_info = build_model(spec, torch, want_training=False)
+    model.to(device)
     model.eval()
     prompt = spec.get("prompt", "")
-    ids = tok(prompt, return_tensors="pt", add_special_tokens=False)
+    ids = tok(prompt, return_tensors="pt", add_special_tokens=False).to(device)
     temperature = float(spec.get("temperature", 0.0))
     started = time.time()
     with torch.no_grad():
@@ -298,13 +325,57 @@ def op_generate(spec):
         "text": tok.decode(new_ids, skip_special_tokens=True),
         "newTokens": int(new_ids.shape[0]),
         "adapterLoaded": peft_info["adapterLoaded"],
+        "device": device.type,
         "wallClockSeconds": round(time.time() - started, 3),
         "peakRssMb": peak_rss_mb(),
         "limits": spec.get("_appliedLimits"),
     })
 
 
-OPS = {"train": op_train, "evaluate": op_evaluate, "generate": op_generate}
+def op_generate_batch(spec):
+    import torch
+
+    device = selected_device(torch)
+    torch.set_num_threads(int(spec.get("threads", 1) or 1))
+    tok, model, peft_info = build_model(spec, torch, want_training=False)
+    model.to(device)
+    model.eval()
+    rows = load_rows(spec["promptsFile"])
+    if not rows or any(not isinstance(row.get("prompt"), str) for row in rows):
+        raise ValueError("generate_batch needs non-empty prompt records")
+    temperature = float(spec.get("temperature", 0.0))
+    max_new_tokens = int(spec.get("maxNewTokens", 16))
+    texts = []
+    started = time.time()
+    with torch.no_grad():
+        for row in rows:
+            # A single-prompt subprocess reseeds on every call. Preserve that
+            # behavior for sampled generation as well as greedy decoding.
+            torch.manual_seed(int(spec.get("seed", 1)))
+            ids = tok(row["prompt"], return_tensors="pt", add_special_tokens=False).to(device)
+            out = model.generate(
+                **ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=temperature > 0,
+                temperature=temperature if temperature > 0 else None,
+                pad_token_id=tok.pad_token_id,
+            )
+            new_ids = out[0][ids["input_ids"].shape[1]:]
+            texts.append(tok.decode(new_ids, skip_special_tokens=True))
+    emit({
+        "op": "generate_batch",
+        "texts": texts,
+        "count": len(texts),
+        "adapterLoaded": peft_info["adapterLoaded"],
+        "device": device.type,
+        "wallClockSeconds": round(time.time() - started, 3),
+        "peakRssMb": peak_rss_mb(),
+        "peakCudaAllocatedMb": round(torch.cuda.max_memory_allocated() / 1048576, 3) if device.type == "cuda" else None,
+        "limits": spec.get("_appliedLimits"),
+    })
+
+
+OPS = {"train": op_train, "evaluate": op_evaluate, "generate": op_generate, "generate_batch": op_generate_batch}
 
 
 def main():

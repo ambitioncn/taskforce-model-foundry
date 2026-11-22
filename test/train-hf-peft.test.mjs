@@ -1,23 +1,33 @@
 // Real-execution tests for the hf-peft backend.
 //
-// These tests run only when the python stack is importable AND the local
-// random-init fixture exists (scripts/make-tiny-hf-fixture.py). Otherwise they
-// skip with the concrete reason instead of asserting on a mock: an unverified
-// capability must read as unverified.
+// These tests run when the Python stack is importable. They generate the local
+// random-init fixture if needed (scripts/make-tiny-hf-fixture.py), and skip
+// with a concrete reason only when the dependencies are unavailable: an
+// unverified capability must read as unverified.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import backend from '../src/train/backends/hf-peft.mjs';
 
 const root = process.cwd();
 const modelId = path.join(root, '.tmf-run/fixtures/tiny-llama');
 const examplesFile = path.join(root, '.tmf-run/fixtures/synth.jsonl');
 const runDir = path.join(root, '.tmf-run/test-hf-peft');
-const budget = { maxSteps: 4, maxSeconds: 120, maxMemoryMb: 3072, threads: 1, checkpointEvery: 2 };
+const budget = { maxSteps: 4, maxSeconds: 120, maxMemoryMb: 65536, threads: 1, checkpointEvery: 2 };
 
 const probe = await backend.probe();
-const fixtureReady = fs.existsSync(path.join(modelId, 'config.json')) && fs.existsSync(examplesFile);
+let fixtureReady = fs.existsSync(path.join(modelId, 'config.json')) && fs.existsSync(examplesFile);
+if (probe.available && !fixtureReady) {
+  const generated = spawnSync(process.env.TMF_PYTHON || 'python3', [
+    path.join(root, 'scripts/make-tiny-hf-fixture.py'), modelId, examplesFile,
+  ], { cwd: root, encoding: 'utf8' });
+  if (generated.status !== 0) {
+    throw new Error(`could not build local hf-peft fixture: ${generated.stderr || generated.stdout}`);
+  }
+  fixtureReady = fs.existsSync(path.join(modelId, 'config.json')) && fs.existsSync(examplesFile);
+}
 const skip = !probe.available
   ? `hf-peft unavailable: ${probe.reason}`
   : !fixtureReady

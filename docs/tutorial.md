@@ -222,9 +222,13 @@ TMF_PYTHON=$PWD/.tmf-venv/bin/python node scripts/hf-peft-e2e.mjs
 ```
 
 The fixture is a randomly initialised 2-layer model with a word-level
-tokenizer and synthetic data: no downloads, no accounts, no paid compute. When
-the python stack or the fixture is absent, `test/train-hf-peft.test.mjs` skips
-with the concrete reason instead of asserting against a mock.
+tokenizer and synthetic data: no downloads, no accounts, no paid compute.
+When the Python stack is available, `test/train-hf-peft.test.mjs` builds a
+missing fixture locally before running real backend tests. If the Python
+dependencies are unavailable, those tests skip with the concrete reason
+instead of asserting against a mock. The normal-path test memory budget is
+65536 MiB of virtual address space to allow CUDA-enabled PyTorch to import;
+the 64 MiB failure-path test remains deliberately constrained.
 
 Ask for a mode a backend does not support and the job fails fast with
 `backend "<id>" does not support mode "<mode>"` (`src/jobs/train.mjs`), so a

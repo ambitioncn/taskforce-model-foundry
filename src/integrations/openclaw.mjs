@@ -17,6 +17,7 @@
 //   * No config value is echoed back verbatim; results are the API records.
 
 import * as api from '../api.mjs';
+import { startBackgroundEvaluation, backgroundEvaluationStatus } from './async-evaluate.mjs';
 import { VERSION } from '../version.mjs';
 
 /** Bumped only on a breaking change to the action set or envelope shape. */
@@ -55,9 +56,18 @@ const ACTIONS = {
   },
   evaluate: {
     summary: 'Score base vs trained model on the independent holdout and apply gates.',
-    params: ['configFile', 'jobId', 'gates', 'reportFile', 'maxNewTokens'],
+    params: ['configFile', 'jobId', 'gates', 'reportFile', 'maxNewTokens', 'background', 'retry'],
     compute: true,
-    handler: (ctx, p) => api.evaluate({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId ?? null, gates: p.gates ?? null, reportFile: p.reportFile ?? null, maxNewTokens: p.maxNewTokens ?? 48 }),
+    handler: (ctx, p) => p.background
+      ? startBackgroundEvaluation({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId, gates: p.gates ?? null, reportFile: p.reportFile ?? null, maxNewTokens: p.maxNewTokens ?? 48, retry: p.retry ?? false })
+      : api.evaluate({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId ?? null, gates: p.gates ?? null, reportFile: p.reportFile ?? null, maxNewTokens: p.maxNewTokens ?? 48 }),
+  },
+  evaluate_status: {
+    summary: 'Read a durable background evaluation receipt without consuming compute.',
+    params: ['configFile', 'jobId', 'requestId'],
+    required: ['jobId', 'requestId'],
+    compute: false,
+    handler: (ctx, p) => backgroundEvaluationStatus({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId, requestId: p.requestId }),
   },
   export: {
     summary: 'Package weights/adapter with lineage, model card and checksums.',

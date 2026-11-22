@@ -91,6 +91,20 @@ const ACTIONS = {
     compute: false,
     handler: (ctx, p) => backgroundEvaluationStatus({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId, requestId: p.requestId }),
   },
+  screenplay_quality_prepare: {
+    summary: 'Score the frozen 120-question screenplay suite and create blind DAPT comparison pairs.',
+    params: ['configFile', 'jobId', 'evalReport', 'suiteFile', 'scriptsDir', 'baseOutputs', 'daptOutputs', 'candidateOutputs', 'cleanDaptReport', 'cleanDaptModel', 'outDir'],
+    required: ['jobId', 'evalReport', 'suiteFile', 'baseOutputs', 'daptOutputs', 'candidateOutputs', 'cleanDaptReport', 'cleanDaptModel', 'outDir'],
+    compute: true,
+    handler: (ctx, p) => api.screenplayQualityPrepare({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, ...p }),
+  },
+  screenplay_quality_finalize: {
+    summary: 'Tally independent blind judges and clean validation loss into a sealed screenplay gate report.',
+    params: ['configFile', 'stageFile', 'judgeVerdicts', 'cleanCandidateReport', 'cleanCandidateModel', 'reportFile'],
+    required: ['stageFile', 'judgeVerdicts', 'cleanCandidateReport', 'cleanCandidateModel', 'reportFile'],
+    compute: true,
+    handler: (ctx, p) => api.screenplayQualityFinalize({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, ...p }),
+  },
   export: {
     summary: 'Package weights/adapter with lineage, model card and checksums.',
     params: ['configFile', 'jobId', 'evalReport', 'qualityReport', 'outDir', 'version', 'evaluateIfMissing'],

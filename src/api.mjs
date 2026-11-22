@@ -17,8 +17,9 @@ import { encodeRecords } from './train/dataset.mjs';
 import { exportModel as packageExport } from './export/package.mjs';
 import { exists, readJson, readJsonl } from './core/fsx.mjs';
 import { VERSION } from './version.mjs';
-import { sha256Json } from './core/hash.mjs';
+import { sha256Json, sha256File } from './core/hash.mjs';
 import { verifyExternalQuality } from './eval/external-quality.mjs';
+import { prepareScreenplayQuality as prepareScreenplayInputs, finalizeScreenplayQuality as finalizeScreenplayInputs } from './eval/screenplay-quality.mjs';
 
 export const PRODUCT = 'taskforce-model-foundry';
 const MIN_NODE_MAJOR = 20;
@@ -294,6 +295,42 @@ async function readPinnedReport(file, baseDir) {
   // Keep the on-disk location in the record so the bundle copies the reviewed
   // file itself instead of re-serializing it.
   return parsed.reportFile ? parsed : { ...parsed, reportFile: abs };
+}
+
+export async function screenplayQualityPrepare({
+  configFile = null, baseDir = process.cwd(), jobId, evalReport,
+  suiteFile, scriptsDir, baseOutputs, daptOutputs, candidateOutputs,
+  cleanDaptReport, cleanDaptModel, outDir,
+} = {}) {
+  const { config } = await loadConfig({ file: configFile, baseDir });
+  const artifacts = await resolveArtifacts({ config, jobId });
+  const technical = typeof evalReport === 'string' ? await readPinnedReport(evalReport, config.baseDir) : evalReport;
+  assertReportIntegrity(technical, { jobId });
+  if (technical.verdict?.status !== 'passed' || !technical.verdict.deliveryEligible) {
+    throw new Error('screenplay quality requires a passed technical evaluation; failed candidates must not consume the 120-question suite');
+  }
+  const contract = config.eval?.externalQuality;
+  if (!contract || !artifacts.externalQuality || sha256Json(contract) !== sha256Json(artifacts.externalQuality) ||
+    technical.lineage?.externalQualityContractDigest !== sha256Json(contract)) {
+    throw new Error('screenplay quality contract was not frozen into training and technical evaluation');
+  }
+  const checkpoint = artifacts.adapterCheckpoint ?? artifacts.tunedCheckpoint;
+  return prepareScreenplayInputs({
+    contract, jobId, evalReport: technical, checkpointSha256: await sha256File(checkpoint),
+    suiteFile, scriptsDir, baseOutputs, daptOutputs, candidateOutputs,
+    cleanDaptReport, cleanDaptModel, outDir,
+  });
+}
+
+export async function screenplayQualityFinalize({
+  configFile = null, baseDir = process.cwd(), stageFile, judgeVerdicts,
+  cleanCandidateReport, cleanCandidateModel, reportFile,
+} = {}) {
+  const { config } = await loadConfig({ file: configFile, baseDir });
+  return finalizeScreenplayInputs({
+    stageFile, contract: config.eval?.externalQuality, judgeVerdicts,
+    cleanCandidateReport, cleanCandidateModel, reportFile,
+  });
 }
 
 /**

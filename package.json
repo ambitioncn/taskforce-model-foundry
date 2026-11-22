@@ -28,6 +28,7 @@
     "integrations/openclaw-plugin/",
     "integrations/hermes-plugin/",
     "scripts/e2e-demo.sh",
+    "scripts/screenplay-quality/",
     "README.md",
     "package.json",
     "!docs/reports",

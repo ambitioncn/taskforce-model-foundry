@@ -178,7 +178,7 @@ when no Python interpreter is on PATH).
 
 ## 4. Action and tool table
 
-Nine actions, nine tools, one table. `compute: true` means the call spends real
+Eleven actions, eleven tools, one table. `compute: true` means the call spends real
 CPU time and writes run artifacts; those are the calls a host should gate.
 
 | OpenClaw action | Hermes tool | Compute | Required | Accepted params |
@@ -191,11 +191,13 @@ CPU time and writes run artifacts; those are the calls a host should gate.
 | `train_cancel` | `tmf_train_cancel` | yes | `jobId`, `requestId` | `configFile`, `jobId`, `requestId` |
 | `evaluate` | `tmf_evaluate` | yes | — | `configFile`, `jobId`, `gates`, `reportFile`, `maxNewTokens`, `background`, `retry` |
 | `evaluate_status` | `tmf_evaluate_status` | no | `jobId`, `requestId` | `configFile`, `jobId`, `requestId` |
+| `screenplay_quality_prepare` | `tmf_screenplay_quality_prepare` | yes | `jobId`, `evalReport`, `suiteFile`, `baseOutputs`, `daptOutputs`, `candidateOutputs`, `cleanDaptReport`, `cleanDaptModel`, `outDir` | `configFile`, `jobId`, `evalReport`, `suiteFile`, `scriptsDir`, `baseOutputs`, `daptOutputs`, `candidateOutputs`, `cleanDaptReport`, `cleanDaptModel`, `outDir` |
+| `screenplay_quality_finalize` | `tmf_screenplay_quality_finalize` | yes | `stageFile`, `judgeVerdicts`, `cleanCandidateReport`, `cleanCandidateModel`, `reportFile` | `configFile`, `stageFile`, `judgeVerdicts`, `cleanCandidateReport`, `cleanCandidateModel`, `reportFile` |
 | `export` | `tmf_export` | yes | — | `configFile`, `jobId`, `evalReport`, `qualityReport`, `outDir`, `version`, `evaluateIfMissing` |
 
 **Read-only mount.** `allowCompute: false` keeps the adapter useful for
 inspection while making compute impossible: the four read-only actions answer
-normally, and all five compute actions are refused with
+normally, and all seven compute actions are refused with
 `compute-not-authorized` *before* any handler runs — nothing is written, no
 partial job appears. Mount read-only wherever the host cannot itself vouch that
 training was authorized.

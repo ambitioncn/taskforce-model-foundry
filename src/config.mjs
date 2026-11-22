@@ -9,6 +9,7 @@
 import path from 'node:path';
 import { readJson, exists } from './core/fsx.mjs';
 import { COMPARATORS } from './eval/gates.mjs';
+import { SCREENPLAY_PROFILE, screenplayGatesMatch } from './eval/screenplay-profile.mjs';
 
 export const CONFIG_FORMAT = 'tmf-config-v1';
 export const DEFAULT_CONFIG_FILES = ['tmf.config.json', '.tmfrc.json'];
@@ -164,7 +165,7 @@ function validateEval(errors, at, raw) {
   if (evalRaw.externalQuality !== undefined) {
     const quality = requireObject(errors, `${at}.externalQuality`, evalRaw.externalQuality, {});
     for (const key of Object.keys(quality)) {
-      if (!['suiteSha256', 'scorerSha256', 'gates'].includes(key)) errors.add(`${at}.externalQuality.${key}`, 'unknown external quality key');
+      if (!['suiteSha256', 'scorerSha256', 'gates', 'profile', 'references'].includes(key)) errors.add(`${at}.externalQuality.${key}`, 'unknown external quality key');
     }
     for (const key of ['suiteSha256', 'scorerSha256']) {
       if (typeof quality[key] !== 'string' || !/^[a-f0-9]{64}$/.test(quality[key])) errors.add(`${at}.externalQuality.${key}`, 'must be a lowercase SHA-256 digest');
@@ -175,6 +176,25 @@ function validateEval(errors, at, raw) {
       const gates = quality.gates.map((gate, i) => validateGate(errors, `${at}.externalQuality.gates[${i}]`, gate)).filter(Boolean);
       if (new Set(gates.map((gate) => gate.id)).size !== gates.length) errors.add(`${at}.externalQuality.gates`, 'duplicate gate id');
       result.externalQuality = { suiteSha256: quality.suiteSha256, scorerSha256: quality.scorerSha256, gates };
+      if (quality.profile !== undefined) {
+        if (quality.profile !== SCREENPLAY_PROFILE) errors.add(`${at}.externalQuality.profile`, `must be ${SCREENPLAY_PROFILE}`);
+        if (!screenplayGatesMatch(gates)) errors.add(`${at}.externalQuality.gates`, `${SCREENPLAY_PROFILE} requires the complete frozen gate set and thresholds`);
+        result.externalQuality.profile = quality.profile;
+      }
+      if (quality.references !== undefined) {
+        const refs = requireObject(errors, `${at}.externalQuality.references`, quality.references, {});
+        for (const [name, digest] of Object.entries(refs)) {
+          if (!/^[a-zA-Z][a-zA-Z0-9]*$/.test(name) || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) {
+            errors.add(`${at}.externalQuality.references.${name}`, 'must be a named lowercase SHA-256 digest');
+          }
+        }
+        result.externalQuality.references = refs;
+      }
+      if (quality.profile === SCREENPLAY_PROFILE) {
+        for (const key of ['baseOutputs', 'daptOutputs', 'cleanDaptReport']) {
+          if (!quality.references?.[key]) errors.add(`${at}.externalQuality.references.${key}`, 'required for screenplay profile');
+        }
+      }
     }
   }
   if (evalRaw.gates === undefined) return result;

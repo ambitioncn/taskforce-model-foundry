@@ -56,7 +56,8 @@ Harnesses can consume the typed, host-neutral operation contract from
 ## Autonomous, bounded campaigns
 
 The optional [campaign controller](docs/campaign.md) runs a preapproved list of
-candidate configs through train → independent evaluate → fixed-rule decision.
+candidate configs or creates new candidates within an approved hyperparameter
+search space, then performs train → independent evaluate → fixed-rule decision.
 It persists each step, deduplicates background starts and resumes after a
 worker interruption. The controller requires no agent harness. It never
 creates new data, changes quality gates or auto-exports a model.

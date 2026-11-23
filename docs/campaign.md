@@ -1,15 +1,16 @@
 # Bounded autonomous campaigns
 
-Foundry can advance a **preapproved** sequence of model candidates without an
-agent harness or an active chat session. The campaign controller uses the core
-API, durable job receipts and an independent background worker. It chooses
-whether to continue or stop from frozen technical gates; it does not generate
-new datasets, invent model configurations, lower thresholds, export, publish or
-claim business acceptance.
+Foundry can advance an explicit candidate list **or create new hyperparameter
+candidates** inside a preapproved search space, without an agent harness or an
+active chat session. The campaign controller uses the core API, durable job
+receipts and an independent background worker. It chooses the next proposal
+from completed evaluation scores; it cannot generate new datasets, change the
+base model or quality gates, export, publish or claim business acceptance.
 
 ## Manifest
 
-Write a `campaign.json` beside all candidate configs and their datasets:
+Write a `campaign.json` beside all candidate configs and their datasets. An
+explicit-candidate campaign looks like this:
 
 ```json
 {
@@ -42,6 +43,48 @@ post-hoc edit makes replay fail instead of silently changing the experiment.
 conservatively. The UTC deadline prevents starting another candidate after it;
 active training/evaluation is not forcibly killed by that deadline, so each
 candidate must also set its own resource/time budgets.
+
+## Create new candidates
+
+Replace `candidates` with `proposal` to let Foundry generate new configs:
+
+```json
+{
+  "format": "tmf-campaign-v1",
+  "id": "ticket-search-r1",
+  "proposal": {
+    "baseConfigFile": "base.json",
+    "strategy": "best-neighbor",
+    "parameters": [
+      { "path": "hyper.lr", "values": [0.0001, 0.0003, 0.001] },
+      { "path": "hyper.batchSize", "values": [2, 4, 8] }
+    ]
+  },
+  "budget": {
+    "maxTrials": 4,
+    "maxTotalTrainSteps": 800,
+    "deadlineAt": "2026-12-01T00:00:00Z"
+  },
+  "policy": {
+    "stopOnTechnicalPass": false,
+    "rankMetric": "tuned.holdout.loss",
+    "direction": "min"
+  }
+}
+```
+
+The base config must include its own value for every search parameter and
+predeclare `eval.gates`. The first trial uses those base values. Later trials
+move to an untried neighboring point around the best measured candidate;
+ties are deterministic. The search is bounded to at most four numeric
+hyperparameter dimensions and 64 combinations. Supported paths are
+`hyper.lr`, `hyper.batchSize`, `hyper.weightDecay`, `hyper.clipNorm`,
+`hyper.warmupRatio`, `hyper.minLrRatio`, `hyper.lora.rank`, and
+`hyper.lora.alpha`; `hyper.steps`, data, model and gate paths are forbidden.
+Generated configs are saved under the campaign's `proposals/` directory with
+the parent proposal, selected values and evaluation digest in the durable
+trial record. Editing the base config, generated config or datasets after
+submission is rejected rather than silently changing the search.
 
 ## Run without a harness
 

@@ -99,8 +99,8 @@ keeps the worker outside the calling CLI or Gateway process; a direct detached
 fallback is reported as `restartDurable: false`. HF evaluation scores holdout,
 generates predictions and scores validation in one model load per side.
 The report records the actual evaluation device. See
-[`docs/external-quality.md`](docs/external-quality.md) to require a separate,
-predeclared Chinese screenplay quality gate before export.
+[`docs/external-quality.md`](docs/external-quality.md) to require separate,
+predeclared domain-quality gates before export.
 `restartDurable: true` means isolated from a **Gateway process restart**, not
 survival of a host reboot or power loss. HF `maxTokens` stops before the next
 over-budget batch; after a hard-killed attempt, tokens spent since the last

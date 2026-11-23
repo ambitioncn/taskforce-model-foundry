@@ -1,6 +1,0 @@
-- [x] Inspect async worker internals and CLI entry points.
-- [x] Implement CLI/OpenClaw background lifecycle for train/evaluate.
-- [x] Implement single-load HF evaluation and compare metrics on tiny fixture.
-- [x] Fix HF token cap and measured token accounting; test.
-- [x] Bind external screenplay quality report to predeclared training contract, checkpoint, technical report; test.
-- [x] Finish final full suite and 31B background evaluation parity; update report.

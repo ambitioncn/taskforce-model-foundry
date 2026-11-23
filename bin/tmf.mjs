@@ -7,7 +7,7 @@
 
 import path from 'node:path';
 import process from 'node:process';
-import { doctor, synthesize, train, status, evaluate, exportModel, screenplayQualityPrepare, screenplayQualityFinalize } from '../src/api.mjs';
+import { doctor, synthesize, train, status, evaluate, exportModel } from '../src/api.mjs';
 import {
   loadConfig, validateConfig, exampleConfig, formatConfigErrors, ConfigError,
   DEFAULT_CONFIG_FILES,
@@ -16,7 +16,6 @@ import { writeJson, readJson, exists } from '../src/core/fsx.mjs';
 import { VERSION } from '../src/index.mjs';
 import { startBackgroundEvaluation, backgroundEvaluationStatus } from '../src/integrations/async-evaluate.mjs';
 import { startBackgroundTraining, backgroundTrainingStatus, cancelBackgroundTraining } from '../src/integrations/async-train.mjs';
-import { createScreenplayQualityContract } from '../src/eval/screenplay-quality.mjs';
 
 const USAGE = `taskforce-model-foundry ${VERSION}
 
@@ -33,9 +32,6 @@ Commands:
   train-status <job> <requestId>     Read a background training receipt
   evaluate-status <job> <requestId>  Read a background evaluation receipt
   train-cancel <job> <requestId>     Cancel background training
-  quality-contract       Freeze the 120-question screenplay gate before a new job
-  quality-prepare        Score full screenplay suite and create blinded DAPT pairs
-  quality-finalize       Tally two judges and clean-val loss; seal external report
   export                 Package a deliverable bundle (gated on evaluation)
                          --report <file> reuses an existing eval report instead of re-evaluating
                          --quality-report <file> pins predeclared external quality evidence
@@ -77,17 +73,6 @@ function parseArgs(argv) {
       case '--job': opts.job = next(); break;
       case '--out': opts.out = next(); break;
       case '--report': opts.report = next(); break;
-      case '--suite': opts.suite = next(); break;
-      case '--scripts-dir': opts.scriptsDir = next(); break;
-      case '--base-outputs': opts.baseOutputs = next(); break;
-      case '--dapt-outputs': opts.daptOutputs = next(); break;
-      case '--candidate-outputs': opts.candidateOutputs = next(); break;
-      case '--clean-dapt-report': opts.cleanDaptReport = next(); break;
-      case '--clean-dapt-model': opts.cleanDaptModel = next(); break;
-      case '--stage': opts.stage = next(); break;
-      case '--judge': (opts.judgeVerdicts ??= []).push(next()); break;
-      case '--clean-candidate-report': opts.cleanCandidateReport = next(); break;
-      case '--clean-candidate-model': opts.cleanCandidateModel = next(); break;
       case '--quality-report': opts.qualityReport = next(); break;
       case '--bundle-version': opts.bundleVersion = next(); break;
       case '--count': opts.count = Number(next()); break;
@@ -336,48 +321,6 @@ async function cmdExport(opts, baseDir) {
   return 0;
 }
 
-async function cmdQualityPrepare(opts, baseDir) {
-  const required = ['job', 'report', 'suite', 'baseOutputs', 'daptOutputs', 'candidateOutputs', 'cleanDaptReport', 'cleanDaptModel', 'out'];
-  for (const key of required) if (!opts[key]) throw new UsageError(`quality-prepare requires --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`);
-  const result = await screenplayQualityPrepare({
-    baseDir, configFile: opts.config ?? null, jobId: opts.job, evalReport: opts.report,
-    suiteFile: opts.suite, scriptsDir: opts.scriptsDir, baseOutputs: opts.baseOutputs,
-    daptOutputs: opts.daptOutputs, candidateOutputs: opts.candidateOutputs,
-    cleanDaptReport: opts.cleanDaptReport, cleanDaptModel: opts.cleanDaptModel,
-    outDir: opts.out,
-  });
-  out(opts, result, [`quality stage: ${result.stageFile}`, `blind pairs: ${result.blindDir}`]);
-  return 0;
-}
-
-async function cmdQualityContract(opts) {
-  for (const key of ['suite', 'baseOutputs', 'daptOutputs', 'cleanDaptReport']) {
-    if (!opts[key]) throw new UsageError(`quality-contract requires --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`);
-  }
-  const contract = await createScreenplayQualityContract({
-    suiteFile: opts.suite, baseOutputs: opts.baseOutputs,
-    daptOutputs: opts.daptOutputs, cleanDaptReport: opts.cleanDaptReport,
-    scriptsDir: opts.scriptsDir,
-  });
-  if (opts.out) await writeJson(path.resolve(opts.out), contract);
-  out(opts, contract, [`frozen screenplay quality contract${opts.out ? `: ${path.resolve(opts.out)}` : ''}`, 'add this object as eval.externalQuality before training']);
-  return 0;
-}
-
-async function cmdQualityFinalize(opts, baseDir) {
-  for (const key of ['stage', 'cleanCandidateReport', 'cleanCandidateModel', 'out']) {
-    if (!opts[key]) throw new UsageError(`quality-finalize requires --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`);
-  }
-  if ((opts.judgeVerdicts ?? []).length < 2) throw new UsageError('quality-finalize requires two or more --judge NAME=FILE arguments');
-  const result = await screenplayQualityFinalize({
-    baseDir, configFile: opts.config ?? null, stageFile: opts.stage,
-    judgeVerdicts: opts.judgeVerdicts, cleanCandidateReport: opts.cleanCandidateReport,
-    cleanCandidateModel: opts.cleanCandidateModel, reportFile: opts.out,
-  });
-  out(opts, result, [`quality report: ${result.reportFile}`, `gates: ${result.report.gates.summary}`]);
-  return result.report.gates.passed ? 0 : 1;
-}
-
 async function cmdStatus(opts, baseDir, rest) {
   const jobId = rest[0] ?? opts.job;
   if (!jobId) throw new UsageError('usage: tmf status <jobId>');
@@ -442,9 +385,6 @@ async function main(argv) {
     case 'train-status': return cmdBackgroundStatus(opts, baseDir, rest, 'train');
     case 'evaluate-status': return cmdBackgroundStatus(opts, baseDir, rest, 'evaluate');
     case 'train-cancel': return cmdTrainCancel(opts, baseDir, rest);
-    case 'quality-contract': return cmdQualityContract(opts);
-    case 'quality-prepare': return cmdQualityPrepare(opts, baseDir);
-    case 'quality-finalize': return cmdQualityFinalize(opts, baseDir);
     case 'export': return cmdExport(opts, baseDir);
     case 'status': return cmdStatus(opts, baseDir, rest);
     default:

@@ -9,7 +9,6 @@
 import path from 'node:path';
 import { readJson, exists } from './core/fsx.mjs';
 import { COMPARATORS } from './eval/gates.mjs';
-import { SCREENPLAY_PROFILE, screenplayGatesMatch } from './eval/screenplay-profile.mjs';
 
 export const CONFIG_FORMAT = 'tmf-config-v1';
 export const DEFAULT_CONFIG_FILES = ['tmf.config.json', '.tmfrc.json'];
@@ -176,11 +175,7 @@ function validateEval(errors, at, raw) {
       const gates = quality.gates.map((gate, i) => validateGate(errors, `${at}.externalQuality.gates[${i}]`, gate)).filter(Boolean);
       if (new Set(gates.map((gate) => gate.id)).size !== gates.length) errors.add(`${at}.externalQuality.gates`, 'duplicate gate id');
       result.externalQuality = { suiteSha256: quality.suiteSha256, scorerSha256: quality.scorerSha256, gates };
-      if (quality.profile !== undefined) {
-        if (quality.profile !== SCREENPLAY_PROFILE) errors.add(`${at}.externalQuality.profile`, `must be ${SCREENPLAY_PROFILE}`);
-        if (!screenplayGatesMatch(gates)) errors.add(`${at}.externalQuality.gates`, `${SCREENPLAY_PROFILE} requires the complete frozen gate set and thresholds`);
-        result.externalQuality.profile = quality.profile;
-      }
+      if (quality.profile !== undefined) result.externalQuality.profile = requireString(errors, `${at}.externalQuality.profile`, quality.profile, null);
       if (quality.references !== undefined) {
         const refs = requireObject(errors, `${at}.externalQuality.references`, quality.references, {});
         for (const [name, digest] of Object.entries(refs)) {
@@ -189,11 +184,6 @@ function validateEval(errors, at, raw) {
           }
         }
         result.externalQuality.references = refs;
-      }
-      if (quality.profile === SCREENPLAY_PROFILE) {
-        for (const key of ['baseOutputs', 'daptOutputs', 'cleanDaptReport']) {
-          if (!quality.references?.[key]) errors.add(`${at}.externalQuality.references.${key}`, 'required for screenplay profile');
-        }
       }
     }
   }

@@ -5,7 +5,6 @@ import { readJson } from '../core/fsx.mjs';
 import { sha256File, sha256Json } from '../core/hash.mjs';
 import { evaluateGates, readMetric } from './gates.mjs';
 import { ExportBlockedError } from '../export/package.mjs';
-import { SCREENPLAY_PROFILE, screenplayGatesMatch } from './screenplay-profile.mjs';
 
 export const EXTERNAL_QUALITY_FORMAT = 'tmf.external-quality/v1';
 export const externalQualityContractDigest = (contract) => sha256Json(contract);
@@ -27,9 +26,7 @@ export async function verifyExternalQuality({ contract, evidence, artifacts, eva
   let report;
   try { report = await readJson(file); } catch (err) { blocked(`external quality report is unreadable: ${err.message}`); }
   if (!report || report.format !== EXTERNAL_QUALITY_FORMAT) blocked('external quality report format mismatch');
-  if (contract.profile === SCREENPLAY_PROFILE && (report.profile !== SCREENPLAY_PROFILE || !screenplayGatesMatch(contract.gates))) {
-    blocked('screenplay report or frozen gate set does not match screenplay-zh-v1');
-  }
+  if (contract.profile && report.profile !== contract.profile) blocked('external quality profile differs from the frozen contract');
   const digest = sha256Json({ ...report, reportDigest: undefined });
   if (report.reportDigest !== digest) blocked('external quality report digest mismatch');
   if (report.jobId !== artifacts.jobId) blocked('external quality report belongs to another job');

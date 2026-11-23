@@ -19,7 +19,6 @@ import { exists, readJson, readJsonl } from './core/fsx.mjs';
 import { VERSION } from './version.mjs';
 import { sha256Json, sha256File } from './core/hash.mjs';
 import { verifyExternalQuality } from './eval/external-quality.mjs';
-import { prepareScreenplayQuality as prepareScreenplayInputs, finalizeScreenplayQuality as finalizeScreenplayInputs } from './eval/screenplay-quality.mjs';
 
 export const PRODUCT = 'taskforce-model-foundry';
 const MIN_NODE_MAJOR = 20;
@@ -225,7 +224,9 @@ async function resolveArtifacts({ artifacts, config, jobId }) {
   const result = Object.fromEntries((state.completedSteps ?? [])
     .filter((step) => step && typeof step === 'object' && step.name)
     .map((step) => [step.name, step.output]));
-  return trainingArtifacts({ ...state, result });
+  // The finalize step is the durable manifest. It includes the predeclared
+  // external-quality contract, which is not a standalone step in the map.
+  return trainingArtifacts({ ...state, result: result.finalize ?? result });
 }
 
 /**
@@ -297,40 +298,22 @@ async function readPinnedReport(file, baseDir) {
   return parsed.reportFile ? parsed : { ...parsed, reportFile: abs };
 }
 
-export async function screenplayQualityPrepare({
-  configFile = null, baseDir = process.cwd(), jobId, evalReport,
-  suiteFile, scriptsDir, baseOutputs, daptOutputs, candidateOutputs,
-  cleanDaptReport, cleanDaptModel, outDir,
-} = {}) {
+/** Bind a project's external scorer to a successful technical evaluation. */
+export async function qualityContext({ configFile = null, baseDir = process.cwd(), jobId, evalReport } = {}) {
   const { config } = await loadConfig({ file: configFile, baseDir });
   const artifacts = await resolveArtifacts({ config, jobId });
   const technical = typeof evalReport === 'string' ? await readPinnedReport(evalReport, config.baseDir) : evalReport;
-  assertReportIntegrity(technical, { jobId });
+  assertReportIntegrity(technical, { jobId: artifacts.jobId });
   if (technical.verdict?.status !== 'passed' || !technical.verdict.deliveryEligible) {
-    throw new Error('screenplay quality requires a passed technical evaluation; failed candidates must not consume the 120-question suite');
+    throw new Error('external quality requires a passed technical evaluation');
   }
   const contract = config.eval?.externalQuality;
   if (!contract || !artifacts.externalQuality || sha256Json(contract) !== sha256Json(artifacts.externalQuality) ||
-    technical.lineage?.externalQualityContractDigest !== sha256Json(contract)) {
-    throw new Error('screenplay quality contract was not frozen into training and technical evaluation');
+      technical.lineage?.externalQualityContractDigest !== sha256Json(contract)) {
+    throw new Error('external quality contract was not frozen into training and technical evaluation');
   }
   const checkpoint = artifacts.adapterCheckpoint ?? artifacts.tunedCheckpoint;
-  return prepareScreenplayInputs({
-    contract, jobId, evalReport: technical, checkpointSha256: await sha256File(checkpoint),
-    suiteFile, scriptsDir, baseOutputs, daptOutputs, candidateOutputs,
-    cleanDaptReport, cleanDaptModel, outDir,
-  });
-}
-
-export async function screenplayQualityFinalize({
-  configFile = null, baseDir = process.cwd(), stageFile, judgeVerdicts,
-  cleanCandidateReport, cleanCandidateModel, reportFile,
-} = {}) {
-  const { config } = await loadConfig({ file: configFile, baseDir });
-  return finalizeScreenplayInputs({
-    stageFile, contract: config.eval?.externalQuality, judgeVerdicts,
-    cleanCandidateReport, cleanCandidateModel, reportFile,
-  });
+  return { contract, jobId: artifacts.jobId, evalReport: technical, checkpointSha256: await sha256File(checkpoint) };
 }
 
 /**

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { startBackgroundTraining, backgroundTrainingStatus } from '../src/integrations/async-train.mjs';
+import { startBackgroundTraining, backgroundTrainingStatus } from '../src/jobs/async-train.mjs';
 import { synthesize } from '../src/api.mjs';
 
 test('background training deduplicates, persists and exposes a stable receipt', async (t) => {

@@ -14,8 +14,8 @@ import {
 } from '../src/config.mjs';
 import { writeJson, readJson, exists } from '../src/core/fsx.mjs';
 import { VERSION } from '../src/index.mjs';
-import { startBackgroundEvaluation, backgroundEvaluationStatus } from '../src/integrations/async-evaluate.mjs';
-import { startBackgroundTraining, backgroundTrainingStatus, cancelBackgroundTraining } from '../src/integrations/async-train.mjs';
+import { startBackgroundEvaluation, backgroundEvaluationStatus } from '../src/jobs/async-evaluate.mjs';
+import { startBackgroundTraining, backgroundTrainingStatus, cancelBackgroundTraining } from '../src/jobs/async-train.mjs';
 
 const USAGE = `taskforce-model-foundry ${VERSION}
 

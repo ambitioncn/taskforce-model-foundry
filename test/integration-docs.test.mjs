@@ -59,7 +59,7 @@ test('doc action table lists every action, tool, compute flag and param', () => 
 test('doc error-code table covers every code the adapters can emit', () => {
   const documented = new Set(tableRows('Code').map((r) => code(r[0])[0]));
   const emitted = new Set();
-  for (const file of ['../src/integrations/openclaw.mjs', '../src/integrations/hermes.mjs']) {
+  for (const file of ['../src/operations.mjs', '../src/integrations/hermes.mjs']) {
     const src = readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8');
     for (const m of src.matchAll(/fail\([^,]+,\s*'([a-z-]+)'/g)) emitted.add(m[1]);
     for (const m of src.matchAll(/\?\s*'(config-error|action-failed)'/g)) emitted.add(m[1]);
@@ -101,6 +101,6 @@ test('doc specifier table matches the package exports map', () => {
   assert.deepEqual(documented, expected, 'specifier table drifted from exports map');
   // ./package.json is load-bearing for the Hermes plugin copy, so the doc must
   // account for it instead of implying the table is the whole exports map.
-  assert.match(DOC, /`package\.json` is a fifth, deliberate `exports` entry/);
+  assert.match(DOC, /`package\.json` is a separate, deliberate `exports` entry/);
   assert.doesNotMatch(DOC, /and four\s+subpath exports/);
 });

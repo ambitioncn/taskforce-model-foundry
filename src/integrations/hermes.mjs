@@ -4,8 +4,8 @@
 // hands the gateway a JSON *string* of arguments, and whatever comes back has
 // to be text the model can read in the next turn. That is a different shape
 // from the OpenClaw tool provider, but it must not be a different product, so
-// this adapter reuses the action table in src/integrations/openclaw.mjs rather
-// than restating it. Adding an action there surfaces it on both hosts.
+// this adapter consumes the harness-neutral operation contract. Adding an
+// action there surfaces it on both hosts.
 //
 // The contract this module promises a Hermes gateway:
 //   * `toolSpecs()` is static and side-effect free, and returns OpenAI-style
@@ -17,7 +17,7 @@
 //   * Unknown tools, unknown params and unauthorized compute are errors with
 //     stable codes, mirroring the OpenClaw codes.
 
-import { ACTION_SPECS, ACTION_NAMES, CONTRACT_VERSION } from './openclaw.mjs';
+import { ACTION_SPECS, ACTION_NAMES, CONTRACT_VERSION, createOperationClient, parametersFor } from '../operations.mjs';
 import * as api from '../api.mjs';
 import { VERSION } from '../version.mjs';
 
@@ -26,27 +26,6 @@ export const HOST = 'hermes';
 
 /** Flat tool-name prefix; Hermes tool names are global to a gateway. */
 export const TOOL_PREFIX = 'tmf_';
-
-/** JSON Schema fragment per accepted param name, for the tool specs. */
-const PARAM_SCHEMA = {
-  configFile: { type: 'string', description: 'Path to a foundry config file; defaults to the adapter config.' },
-  requireConfig: { type: 'boolean', description: 'Fail the check when no config file can be loaded.' },
-  jobId: { type: 'string', description: 'Job id; omit to use the latest job in the workspace.' },
-  auditTail: { type: 'integer', description: 'How many trailing audit-log lines to include.' },
-  outDir: { type: 'string', description: 'Output directory.' },
-  seed: { type: 'integer', description: 'Deterministic seed for synthesis.' },
-  count: { type: 'integer', description: 'Number of synthetic examples to write.' },
-  profile: { type: 'string', description: 'Synthetic corpus profile name.' },
-  resume: { type: 'boolean', description: 'Resume an interrupted job instead of starting over.' },
-  resumeCancelled: { type: 'boolean', description: 'Also resume a job that was cancelled.' },
-  auditEveryStep: { type: 'integer', description: 'Audit-log cadence in training steps.' },
-  gates: { type: 'object', description: 'Acceptance gate thresholds to apply to the eval report.' },
-  reportFile: { type: 'string', description: 'Path to write the evaluation report to.' },
-  maxNewTokens: { type: 'integer', description: 'Generation budget per eval sample.' },
-  evalReport: { type: 'string', description: 'Path to an existing evaluation report to pin into the export.' },
-  version: { type: 'string', description: 'Version label for the exported package.' },
-  evaluateIfMissing: { type: 'boolean', description: 'Run evaluation first when no report is pinned.' },
-};
 
 export const TOOL_NAMES = Object.freeze(ACTION_NAMES.map((a) => `${TOOL_PREFIX}${a}`));
 
@@ -60,19 +39,12 @@ function actionOf(tool) {
 export function toolSpecs() {
   return ACTION_NAMES.map((action) => {
     const spec = ACTION_SPECS[action];
-    const properties = {};
-    for (const p of spec.params) properties[p] = PARAM_SCHEMA[p] ?? { description: `Parameter "${p}".` };
     return {
       type: 'function',
       function: {
         name: `${TOOL_PREFIX}${action}`,
         description: `${spec.summary}${spec.compute ? ' Consumes compute.' : ''}`,
-        parameters: {
-          type: 'object',
-          properties,
-          required: [...(spec.required ?? [])],
-          additionalProperties: false,
-        },
+        parameters: { ...parametersFor(action), required: [...(spec.required ?? [])] },
       },
     };
   });
@@ -115,7 +87,7 @@ function fail(tool, code, message) {
  * refused with `compute-not-authorized` instead of running.
  */
 export function createHermesAdapter({ baseDir = process.cwd(), configFile = null, allowCompute = true } = {}) {
-  const ctx = { baseDir, configFile };
+  const client = createOperationClient({ baseDir, configFile, allowCompute });
 
   async function callTool(tool, args = {}) {
     const action = actionOf(tool);
@@ -138,25 +110,9 @@ export function createHermesAdapter({ baseDir = process.cwd(), configFile = null
     if (typeof params !== 'object' || Array.isArray(params)) {
       return fail(tool, 'invalid-params', 'arguments must decode to a plain object');
     }
-    const spec = ACTION_SPECS[action];
-    const unknown = Object.keys(params).filter((k) => !spec.params.includes(k));
-    if (unknown.length) {
-      return fail(tool, 'unknown-params', `unknown params for "${tool}": ${unknown.join(', ')}`);
-    }
-    const missing = (spec.required ?? []).filter((k) => params[k] === undefined || params[k] === null);
-    if (missing.length) {
-      return fail(tool, 'missing-params', `tool "${tool}" requires: ${missing.join(', ')}`);
-    }
-    if (spec.compute && !allowCompute) {
-      return fail(tool, 'compute-not-authorized', `tool "${tool}" consumes compute and this adapter was mounted read-only`);
-    }
-    try {
-      const result = await spec.handler(ctx, params);
-      return { ok: true, contractVersion: CONTRACT_VERSION, host: HOST, tool, action, result, content: textOf(result) };
-    } catch (err) {
-      const code = err?.code && typeof err.code === 'string' ? err.code : err?.name === 'ConfigError' ? 'config-error' : 'action-failed';
-      return fail(tool, code, err?.message ?? String(err));
-    }
+    const response = await client.invoke(action, params);
+    if (!response.ok) return fail(tool, response.error.code, response.error.message);
+    return { ...response, host: HOST, tool, content: textOf(response.result) };
   }
 
   return { host: HOST, baseDir, allowCompute, manifest, toolSpecs, tools: TOOL_NAMES, callTool };

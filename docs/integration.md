@@ -1,10 +1,10 @@
-# Integration and installation (OpenClaw / Hermes)
+# Standalone operation and optional harness integration
 
 This document is the host-side contract for mounting Taskforce Model Foundry
-inside an agent runtime. Both adapters are **in-process ES modules** — no
-daemon, no socket, no shelling out to the `tmf` CLI — and both are driven by the
-single action table in `src/integrations/openclaw.mjs`, so a new action appears
-on both hosts at once and the two hosts cannot drift.
+inside an agent runtime. The `tmf` CLI and `/api` work without any agent
+harness installed. Both adapters are **in-process ES modules** — no daemon, no
+socket, no shelling out to the `tmf` CLI — and use the harness-neutral action
+contract in `src/operations.mjs`. A new host can use that contract directly.
 
 Verified against the packaged artifact, not the source tree: see
 `artifacts/taskforce-model-foundry/evidence/cp23-r7-pack-install.md` for the
@@ -28,13 +28,14 @@ npm i /path/to/taskforce-model-foundry-0.3.0.tgz
 ```
 
 The install provides one bin, `tmf` (`node_modules/.bin/tmf`), and the
-export specifiers below. `package.json` is a fifth, deliberate `exports` entry
+export specifiers below. `package.json` is a separate, deliberate `exports` entry
 (see §3.1); it is not an API surface.
 
 | Specifier | Purpose |
 | --- | --- |
-| `taskforce-model-foundry` | Root export; re-exports the API plus `.openclaw` / `.hermes`. |
+| `taskforce-model-foundry` | Root export; re-exports the API and legacy adapter namespaces. |
 | `taskforce-model-foundry/api` | Programmatic API (`doctor`, `status`, `synthesize`, `train`, `evaluate`, `exportModel`). |
+| `taskforce-model-foundry/operations` | Harness-neutral actions, typed schemas and invoke client. |
 | `taskforce-model-foundry/integrations/openclaw` | OpenClaw tool-provider adapter. |
 | `taskforce-model-foundry/integrations/openclaw-plugin` | OpenClaw host plugin entry; needs the host-provided `openclaw` package. |
 | `taskforce-model-foundry/integrations/openclaw-plugin/tools` | Host-free tool face (`buildTools`), importable without `openclaw`. |
@@ -42,7 +43,8 @@ export specifiers below. `package.json` is a fifth, deliberate `exports` entry
 
 The root export and the subpaths resolve to the **same module instances**
 (`root.hermes.toolSpecs === hermes.toolSpecs`), so a host may mix specifiers
-without ending up with two copies of the action table.
+without ending up with two copies of the operation contract. New integrations
+should import `/operations`, not either harness adapter.
 
 Smoke-check an install before mounting it:
 

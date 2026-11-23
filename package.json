@@ -1,7 +1,7 @@
 {
   "name": "taskforce-model-foundry",
   "version": "0.3.0",
-  "description": "Taskforce Model Foundry: automated private-data model customization engine for OpenClaw and Hermes. Real post-training (weight/adapter updates), independent holdout evaluation, auditable jobs, and signed export lineage.",
+  "description": "Taskforce Model Foundry: standalone model customization engine with optional agent-harness adapters. Real post-training, independent evaluation, auditable jobs, and signed export lineage.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -14,6 +14,7 @@
   "exports": {
     ".": "./src/index.mjs",
     "./api": "./src/api.mjs",
+    "./operations": "./src/operations.mjs",
     "./integrations/openclaw": "./src/integrations/openclaw.mjs",
     "./integrations/openclaw-plugin": "./integrations/openclaw-plugin/index.mjs",
     "./integrations/openclaw-plugin/tools": "./integrations/openclaw-plugin/tools.mjs",

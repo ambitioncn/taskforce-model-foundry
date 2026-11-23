@@ -1,15 +1,16 @@
 # taskforce-model-foundry
 
-An automated model customization engine for OpenClaw and Hermes: it generates or
-ingests a corpus, runs **real** post-training (weights actually move), evaluates
-the result on an independent holdout split, and refuses to call a regression an
-improvement.
+An independent model customization engine with optional OpenClaw and Hermes
+adapters: it generates or ingests a corpus, runs **real** post-training (weights
+actually move), evaluates the result on an independent holdout split, and
+refuses to call a regression an improvement.
 
 - Node.js 20+, **zero runtime dependencies**
 - Real training, not a simulation: every job reports its parameter L2 delta
 - Durable, resumable, audited jobs — state is re-read from disk, not memory
 - Gate-guarded evaluation: `assertDeliverable()` throws on a failed gate
 - No private data and no network needed to try it out
+- No agent harness is required for the CLI or programmatic API
 
 ## Quickstart
 
@@ -43,12 +44,14 @@ run against an installed copy.
 ## Programmatic API
 
 ```js
-import { doctor, synthesize, train, status } from 'taskforce-model-foundry';
+import { doctor, synthesize, train, status } from 'taskforce-model-foundry/api';
 ```
 
 The CLI is a thin wrapper over this API, so embedders get identical behaviour
 without shelling out. Lower-level building blocks are exported under the stable
 namespaces `data`, `synth`, `jobs`, `trainJob`, `evalJob`, `gates`, `backends`.
+Harnesses can consume the typed, host-neutral operation contract from
+`taskforce-model-foundry/operations`; OpenClaw and Hermes are optional adapters.
 
 ## CLI surface
 

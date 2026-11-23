@@ -16,6 +16,8 @@ import { writeJson, readJson, exists } from '../src/core/fsx.mjs';
 import { VERSION } from '../src/index.mjs';
 import { startBackgroundEvaluation, backgroundEvaluationStatus } from '../src/jobs/async-evaluate.mjs';
 import { startBackgroundTraining, backgroundTrainingStatus, cancelBackgroundTraining } from '../src/jobs/async-train.mjs';
+import { runCampaign } from '../src/controller/campaign.mjs';
+import { startCampaign, backgroundCampaignStatus, cancelCampaign } from '../src/controller/background.mjs';
 
 const USAGE = `taskforce-model-foundry ${VERSION}
 
@@ -32,6 +34,10 @@ Commands:
   train-status <job> <requestId>     Read a background training receipt
   evaluate-status <job> <requestId>  Read a background evaluation receipt
   train-cancel <job> <requestId>     Cancel background training
+  campaign run           Run a preapproved, bounded campaign
+  campaign start         Start a campaign in an independent background worker
+  campaign status        Read campaign and worker state
+  campaign cancel        Request cancellation of its background worker
   export                 Package a deliverable bundle (gated on evaluation)
                          --report <file> reuses an existing eval report instead of re-evaluating
                          --quality-report <file> pins predeclared external quality evidence
@@ -50,6 +56,7 @@ Options:
       --no-resume        Ignore existing job state instead of resuming
       --background       Run train/evaluate in an independent worker; return requestId
       --retry            Explicitly retry a failed/interrupted background request
+      --plan <file>      Campaign manifest (required for campaign commands)
 
 Exit codes:
   0 ok   1 the job ran and did not succeed   2 usage error
@@ -80,6 +87,7 @@ function parseArgs(argv) {
       case '--no-resume': opts.resume = false; break;
       case '--background': opts.background = true; break;
       case '--retry': opts.retry = true; break;
+      case '--plan': opts.plan = next(); break;
       case '-h': case '--help': opts.help = true; break;
       case '-v': case '--version': opts.version = true; break;
       default:
@@ -357,6 +365,43 @@ async function cmdTrainCancel(opts, baseDir, rest) {
   return 0;
 }
 
+async function cmdCampaign(opts, baseDir, rest) {
+  const action = rest[0];
+  if (!['run', 'start', 'status', 'cancel'].includes(action)) {
+    throw new UsageError('usage: tmf campaign <run|start|status|cancel> --plan <file>');
+  }
+  if (!opts.plan) throw new UsageError('campaign commands require --plan <file>');
+  const planFile = path.resolve(baseDir, opts.plan);
+  if (action === 'start') {
+    const receipt = await startCampaign({ planFile, resumeCancelled: opts.resumeCancelled });
+    out(opts, receipt, [`campaign ${receipt.campaignId}: ${receipt.state}`, `request: ${receipt.requestId}`]);
+    return ['failed', 'budget_exceeded'].includes(receipt.state) ? 1 : 0;
+  }
+  if (action === 'status') {
+    const receipt = await backgroundCampaignStatus({ planFile });
+    out(opts, receipt, [`campaign ${receipt.campaignId}: ${receipt.state}`,
+      ...(receipt.decision ? [`decision: ${receipt.decision.status}`] : [])]);
+    return ['failed', 'budget_exceeded', 'interrupted'].includes(receipt.state) ? 1 : 0;
+  }
+  if (action === 'cancel') {
+    const receipt = await cancelCampaign({ planFile });
+    out(opts, receipt, [`campaign ${receipt.campaignId}: ${receipt.cancelRequested ? 'cancel requested' : receipt.state}`]);
+    return 0;
+  }
+  const controller = new AbortController();
+  const disarm = installCancelHandlers(controller);
+  try {
+    const state = await runCampaign({ planFile, signal: controller.signal, resumeCancelled: opts.resumeCancelled });
+    out(opts, state, [`campaign ${state.jobId}: ${state.state}`,
+      ...(state.result ? [`decision: ${state.result.status}`, `trials: ${state.result.trials.length}`] : [])]);
+    return state.result?.status === 'no_candidate_passed' ? 1 : 0;
+  } catch (err) {
+    if (err?.code !== 'JOB_CANCELLED') throw err;
+    out(opts, { state: 'cancelled', message: err.message }, ['campaign cancelled; use --resume-cancelled to continue']);
+    return 130;
+  } finally { disarm(); }
+}
+
 async function main(argv) {
   let opts;
   try {
@@ -385,6 +430,7 @@ async function main(argv) {
     case 'train-status': return cmdBackgroundStatus(opts, baseDir, rest, 'train');
     case 'evaluate-status': return cmdBackgroundStatus(opts, baseDir, rest, 'evaluate');
     case 'train-cancel': return cmdTrainCancel(opts, baseDir, rest);
+    case 'campaign': return cmdCampaign(opts, baseDir, rest);
     case 'export': return cmdExport(opts, baseDir);
     case 'status': return cmdStatus(opts, baseDir, rest);
     default:

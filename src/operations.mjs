@@ -2,8 +2,10 @@
 // future hosts must use the same actions, typed parameters, authority flag and
 // response envelope. This module imports no agent harness package.
 import * as api from './api.mjs';
+import path from 'node:path';
 import { startBackgroundEvaluation, backgroundEvaluationStatus } from './jobs/async-evaluate.mjs';
 import { startBackgroundTraining, backgroundTrainingStatus, cancelBackgroundTraining } from './jobs/async-train.mjs';
+import { startCampaign, backgroundCampaignStatus, cancelCampaign } from './controller/background.mjs';
 
 export const CONTRACT_VERSION = 1;
 const ACTIONS = {
@@ -74,6 +76,21 @@ const ACTIONS = {
     compute: true,
     handler: (ctx, p) => api.exportModel({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId ?? null, evalReport: p.evalReport ?? null, qualityReport: p.qualityReport ?? null, outDir: p.outDir ?? null, version: p.version ?? null, evaluateIfMissing: p.evaluateIfMissing ?? true }),
   },
+  campaign_start: {
+    summary: 'Start a bounded preapproved training campaign in an independent worker.',
+    params: ['planFile', 'resumeCancelled'], required: ['planFile'], compute: true,
+    handler: (ctx, p) => startCampaign({ planFile: path.resolve(ctx.baseDir, p.planFile), resumeCancelled: p.resumeCancelled ?? false }),
+  },
+  campaign_status: {
+    summary: 'Read a durable campaign decision and worker status.',
+    params: ['planFile'], required: ['planFile'], compute: false,
+    handler: (ctx, p) => backgroundCampaignStatus({ planFile: path.resolve(ctx.baseDir, p.planFile) }),
+  },
+  campaign_cancel: {
+    summary: 'Request cancellation of an active campaign worker.',
+    params: ['planFile'], required: ['planFile'], compute: true,
+    handler: (ctx, p) => cancelCampaign({ planFile: path.resolve(ctx.baseDir, p.planFile) }),
+  },
 };
 
 
@@ -83,6 +100,7 @@ export const ACTION_SPECS = Object.freeze(ACTIONS);
 // The single JSON Schema source for every host's tool definitions.
 export const PARAM_SCHEMA = Object.freeze({
   configFile: { type: 'string', description: 'Foundry config file path.' },
+  planFile: { type: 'string', description: 'Preapproved campaign manifest path.' },
   requireConfig: { type: 'boolean', description: 'Fail when no config file is present.' },
   jobId: { type: 'string', description: 'Durable Foundry job id.' },
   auditTail: { type: 'integer', description: 'How many audit-log lines to return.' },

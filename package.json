@@ -15,6 +15,7 @@
     ".": "./src/index.mjs",
     "./api": "./src/api.mjs",
     "./operations": "./src/operations.mjs",
+    "./controller": "./src/controller/index.mjs",
     "./integrations/openclaw": "./src/integrations/openclaw.mjs",
     "./integrations/openclaw-plugin": "./integrations/openclaw-plugin/index.mjs",
     "./integrations/openclaw-plugin/tools": "./integrations/openclaw-plugin/tools.mjs",

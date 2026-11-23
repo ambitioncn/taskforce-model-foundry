@@ -36,6 +36,7 @@ export specifiers below. `package.json` is a separate, deliberate `exports` entr
 | `taskforce-model-foundry` | Root export; re-exports the API and legacy adapter namespaces. |
 | `taskforce-model-foundry/api` | Programmatic API (`doctor`, `status`, `synthesize`, `train`, `evaluate`, `exportModel`). |
 | `taskforce-model-foundry/operations` | Harness-neutral actions, typed schemas and invoke client. |
+| `taskforce-model-foundry/controller` | Harness-neutral bounded campaign runner, background start/status/cancel. |
 | `taskforce-model-foundry/integrations/openclaw` | OpenClaw tool-provider adapter. |
 | `taskforce-model-foundry/integrations/openclaw-plugin` | OpenClaw host plugin entry; needs the host-provided `openclaw` package. |
 | `taskforce-model-foundry/integrations/openclaw-plugin/tools` | Host-free tool face (`buildTools`), importable without `openclaw`. |
@@ -180,7 +181,7 @@ when no Python interpreter is on PATH).
 
 ## 4. Action and tool table
 
-Nine actions, nine tools, one table. `compute: true` means the call spends real
+Twelve actions, twelve tools, one table. `compute: true` means the call spends real
 CPU time and writes run artifacts; those are the calls a host should gate.
 
 | OpenClaw action | Hermes tool | Compute | Required | Accepted params |
@@ -194,10 +195,13 @@ CPU time and writes run artifacts; those are the calls a host should gate.
 | `evaluate` | `tmf_evaluate` | yes | — | `configFile`, `jobId`, `gates`, `reportFile`, `maxNewTokens`, `background`, `retry` |
 | `evaluate_status` | `tmf_evaluate_status` | no | `jobId`, `requestId` | `configFile`, `jobId`, `requestId` |
 | `export` | `tmf_export` | yes | — | `configFile`, `jobId`, `evalReport`, `qualityReport`, `outDir`, `version`, `evaluateIfMissing` |
+| `campaign_start` | `tmf_campaign_start` | yes | `planFile` | `planFile`, `resumeCancelled` |
+| `campaign_status` | `tmf_campaign_status` | no | `planFile` | `planFile` |
+| `campaign_cancel` | `tmf_campaign_cancel` | yes | `planFile` | `planFile` |
 
 **Read-only mount.** `allowCompute: false` keeps the adapter useful for
-inspection while making compute impossible: the four read-only actions answer
-normally, and all five compute actions are refused with
+inspection while making compute impossible: the five read-only actions answer
+normally, and all seven compute actions are refused with
 `compute-not-authorized` *before* any handler runs — nothing is written, no
 partial job appears. Mount read-only wherever the host cannot itself vouch that
 training was authorized.
@@ -215,7 +219,7 @@ A host can branch on `error.code` without parsing messages.
 | `invalid-json` | Hermes only: the argument string was not valid JSON. |
 | `invalid-params` | Arguments did not decode to a plain object. |
 | `unknown-params` | A param outside the action's accepted list was supplied. |
-| `missing-params` | A required param (today only `jobId`) was absent or null. |
+| `missing-params` | A required param was absent or null. |
 | `compute-not-authorized` | Compute action on an `allowCompute: false` mount. |
 | `config-error` | Config file missing, unparsable or internally inconsistent. |
 | `action-failed` | Fallback for any other handler failure; message carries the detail. |

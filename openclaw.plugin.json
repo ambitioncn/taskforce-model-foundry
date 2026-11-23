@@ -21,7 +21,10 @@
       "tmf_train_cancel",
       "tmf_evaluate",
       "tmf_evaluate_status",
-      "tmf_export"
+      "tmf_export",
+      "tmf_campaign_start",
+      "tmf_campaign_status",
+      "tmf_campaign_cancel"
     ]
   }
 }

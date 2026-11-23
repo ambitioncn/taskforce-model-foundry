@@ -53,6 +53,14 @@ namespaces `data`, `synth`, `jobs`, `trainJob`, `evalJob`, `gates`, `backends`.
 Harnesses can consume the typed, host-neutral operation contract from
 `taskforce-model-foundry/operations`; OpenClaw and Hermes are optional adapters.
 
+## Autonomous, bounded campaigns
+
+The optional [campaign controller](docs/campaign.md) runs a preapproved list of
+candidate configs through train → independent evaluate → fixed-rule decision.
+It persists each step, deduplicates background starts and resumes after a
+worker interruption. The controller requires no agent harness. It never
+creates new data, changes quality gates or auto-exports a model.
+
 ## CLI surface
 
 | Command | Purpose |
@@ -64,6 +72,8 @@ Harnesses can consume the typed, host-neutral operation contract from
 | `tmf synth` | Generate a synthetic corpus |
 | `tmf train` | Run a real post-training job (resumable, cancellable with `Ctrl-C`) |
 | `tmf status <jobId>` | Durable job state and recent audit events |
+| `tmf campaign start/status/cancel --plan <file>` | Independent background campaign lifecycle |
+| `tmf campaign run --plan <file>` | Supervised foreground campaign run |
 
 Exit codes: `0` ok, `1` check/job failed, `2` usage error, `130` job cancelled
 by an operator signal (durable state kept; the printed `--resume-cancelled`

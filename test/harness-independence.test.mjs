@@ -30,6 +30,8 @@ test('optional harness adapters expose the same typed operation schema', () => {
 test('the neutral client works without a harness adapter', async () => {
   const client = createOperationClient({ allowCompute: false });
   assert.equal((await client.invoke('train', {})).error.code, 'compute-not-authorized');
+  assert.equal((await client.invoke('campaign_start', { planFile: 'campaign.json' })).error.code, 'compute-not-authorized');
+  assert.equal((await client.invoke('campaign_cancel', { planFile: 'campaign.json' })).error.code, 'compute-not-authorized');
   assert.equal((await client.invoke('not-an-action', {})).error.code, 'unknown-action');
   assert.equal((await client.invoke('__proto__', {})).error.code, 'unknown-action');
 });

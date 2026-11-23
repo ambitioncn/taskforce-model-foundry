@@ -2,4 +2,4 @@
 //
 // It lives in its own module so api.mjs can stamp exports with it without
 // importing the package entry point (which imports api.mjs in turn).
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';

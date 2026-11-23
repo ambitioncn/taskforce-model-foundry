@@ -58,6 +58,9 @@ Harnesses can consume the typed, host-neutral operation contract from
 The optional [campaign controller](docs/campaign.md) runs a preapproved list of
 candidate configs or creates new candidates within an approved hyperparameter
 search space, then performs train → independent evaluate → fixed-rule decision.
+An optional `reflective` strategy records each failed gate, compares prior
+evidence and proposes a bounded contrasting, extrapolated or pivoted trial
+rather than only searching adjacent grid points.
 It persists each step, deduplicates background starts and resumes after a
 worker interruption. The controller requires no agent harness. It never
 creates new data, changes quality gates or auto-exports a model.

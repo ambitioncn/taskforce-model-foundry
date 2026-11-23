@@ -86,6 +86,29 @@ the parent proposal, selected values and evaluation digest in the durable
 trial record. Editing the base config, generated config or datasets after
 submission is rejected rather than silently changing the search.
 
+For a **failure-driven loop**, set `strategy` to `reflective` instead. After
+each failed technical evaluation, Foundry saves a structured reflection in
+the trial receipt: immutable report digest, failed gates and their
+actual/threshold/sample counts, normalized gate shortfall, prior comparison,
+a testable hypothesis, and the exact next configuration changes. The first
+failure tests a distant contrast (possibly changing several parameters), not
+merely a neighbor. If gate shortfall improves it may extrapolate to a farther
+permitted point; if not, it pivots to a different untried combination. The
+frozen rank metric breaks ties, but a better proxy score cannot override worse
+gate failures. Missing metrics or insufficient holdout samples stop proposal
+search with `skipped_unactionable_evidence`; they do not trigger speculative
+training. When the approved space or budget is exhausted, the loop stops and
+reports failure. Every choice remains reproducible from the frozen manifest
+and recorded reports.
+
+This built-in reflection is an evidence-driven **bounded experiment heuristic**,
+not an LLM generating arbitrary training recipes or a causal diagnosis. It
+cannot invent data, a new base model, new gate thresholds, extra training
+steps, or unapproved intervention types. Those need a separately reviewed
+campaign contract. Operational failures such as a crashed training worker
+remain terminal for this campaign rather than being mislabeled as a quality
+failure and retried blindly.
+
 ## Run without a harness
 
 ```bash

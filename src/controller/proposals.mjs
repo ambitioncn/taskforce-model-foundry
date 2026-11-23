@@ -24,7 +24,9 @@ export function buildProposalPool({ proposal, baseRaw, baseDir }) {
   if (!plain(proposal) || Object.keys(proposal).some((key) => !['baseConfigFile', 'strategy', 'parameters'].includes(key))) {
     throw new Error('campaign.proposal must contain only baseConfigFile, strategy and parameters');
   }
-  if (proposal.strategy !== 'best-neighbor') throw new Error('campaign.proposal.strategy must be best-neighbor');
+  if (!['best-neighbor', 'reflective'].includes(proposal.strategy)) {
+    throw new Error('campaign.proposal.strategy must be best-neighbor or reflective');
+  }
   if (!Array.isArray(proposal.parameters) || proposal.parameters.length < 1 || proposal.parameters.length > MAX_DIMENSIONS) {
     throw new Error(`campaign.proposal.parameters must contain 1-${MAX_DIMENSIONS} dimensions`);
   }
@@ -85,4 +87,115 @@ export function chooseNextProposal({ pool, baselineIndices, previous, direction 
     byId(a, b));
   const chosen = remaining[0] ?? null;
   return chosen ? { ...chosen, parentId: anchor?.id ?? null } : null;
+}
+
+function untried(pool, previous) {
+  const tried = new Set(previous.map((item) => item?.id));
+  return pool.filter((item) => !tried.has(item.id));
+}
+
+function mostNovel(remaining, previous, anchor, pool) {
+  const tried = previous.map((item) => item.indices ?? pool.find((candidate) => candidate.id === item.id)?.indices).filter(Boolean);
+  return [...remaining].sort((a, b) => {
+    const novelty = (item) => Math.min(...tried.map((indices) => distance(item.indices, indices)));
+    return novelty(b) - novelty(a) || distance(b.indices, anchor) - distance(a.indices, anchor) || byId(a, b);
+  })[0] ?? null;
+}
+
+export function gateFailureSeverity(results) {
+  if (!Array.isArray(results) || !results.length) return null;
+  let severity = 0;
+  for (const gate of results) {
+    if (gate.ok) continue;
+    if (!['gte', 'gt', 'lte', 'lt'].includes(gate.comparator) ||
+        typeof gate.actual !== 'number' || !Number.isFinite(gate.actual) ||
+        typeof gate.threshold !== 'number' || !Number.isFinite(gate.threshold) ||
+        (gate.minSamples && (!Number.isFinite(gate.samples) || gate.samples < gate.minSamples))) return null;
+    const deficit = ['gte', 'gt'].includes(gate.comparator)
+      ? Math.max(0, gate.threshold - gate.actual)
+      : Math.max(0, gate.actual - gate.threshold);
+    severity += Math.max(deficit / Math.max(1, Math.abs(gate.threshold)), Number.EPSILON);
+  }
+  return severity;
+}
+
+/**
+ * A recorded evidence -> diagnosis -> action loop. This is a deliberately
+ * bounded heuristic, not a claim that a gate failure proves causation.
+ */
+export function reflectOnFailedTrial({ pool, previous, current, report, direction }) {
+  const failedGates = (report.gates?.results ?? []).filter((gate) => !gate.ok).map((gate) => ({
+    id: gate.id, metric: gate.metric, actual: gate.actual ?? null,
+    comparator: gate.comparator, threshold: gate.threshold,
+    samples: gate.samples ?? null, minSamples: gate.minSamples ?? null,
+    reason: gate.reason ?? null,
+  }));
+  const severity = gateFailureSeverity(report.gates?.results);
+  const actionable = severity !== null && failedGates.length > 0 && failedGates.every((gate) =>
+    typeof gate.actual === 'number' && Number.isFinite(gate.actual) &&
+    (gate.minSamples === null || gate.samples >= gate.minSamples));
+  const earlier = previous.filter((item) => typeof item.gateSeverity === 'number' ||
+    (typeof item.score === 'number' && Number.isFinite(item.score)));
+  const bestPrior = [...earlier].sort((a, b) => {
+    if (typeof a.gateSeverity === 'number' && typeof b.gateSeverity === 'number' && a.gateSeverity !== b.gateSeverity) {
+      return a.gateSeverity - b.gateSeverity;
+    }
+    return (direction === 'min' ? a.score - b.score : b.score - a.score) || byId(a, b);
+  })[0] ?? null;
+  const observation = { reportDigest: report.reportDigest, failedGates,
+    gateSeverity: severity, rankMetricScore: current.score ?? null,
+    bestPrior: bestPrior ? { id: bestPrior.id, gateSeverity: bestPrior.gateSeverity ?? null, score: bestPrior.score } : null };
+  const remaining = untried(pool, [...previous, current]);
+  let method = 'contrast';
+  let candidate = null;
+  let hypothesis = 'No earlier comparison supports a direction; test a distant permitted configuration to gather contrastive evidence.';
+  if (!actionable) {
+    method = 'stop_unactionable';
+    hypothesis = 'A metric is missing, the sample floor failed, or gate evidence is unavailable. Hyperparameter search cannot validate this result.';
+  } else if (remaining.length === 0) {
+    method = 'stop_exhausted';
+    hypothesis = 'Every preapproved configuration has already been tried.';
+  } else if (bestPrior && (typeof bestPrior.gateSeverity === 'number'
+    ? severity < bestPrior.gateSeverity
+    : current.score !== null && (direction === 'min' ? current.score < bestPrior.score : current.score > bestPrior.score))) {
+    const priorPoint = pool.find((item) => item.id === bestPrior.id);
+    const delta = current.indices.map((value, i) => value - priorPoint.indices[i]);
+    const forward = remaining.map((item) => ({ item,
+      projection: item.indices.reduce((sum, value, i) => sum + (value - current.indices[i]) * Math.sign(delta[i]), 0) }))
+      .filter((entry) => entry.projection > 0)
+      .sort((a, b) => b.projection - a.projection || distance(b.item.indices, current.indices) - distance(a.item.indices, current.indices) || byId(a.item, b.item));
+    if (forward.length) {
+      method = 'extrapolate';
+      candidate = forward[0].item;
+      hypothesis = 'The latest trial reduced frozen-gate failure severity against the previous best; test a farther permitted point in that direction.';
+    } else {
+      method = 'pivot';
+      hypothesis = 'The latest trial improved, but no untried point extends that direction; test a different permitted combination.';
+    }
+  } else if (bestPrior) {
+    method = 'pivot';
+    hypothesis = 'The latest trial did not reduce frozen-gate failure severity against the previous best; test a contrasting permitted combination.';
+  }
+  if (actionable && !candidate && remaining.length) candidate = mostNovel(remaining, [...previous, current], current.indices, pool);
+  const changes = candidate ? Object.fromEntries(Object.entries(candidate.parameters).filter(
+    ([key, value]) => value !== current.parameters[key]).map(([key, value]) => [key, { from: current.parameters[key], to: value }])) : {};
+  return { observation, diagnosis: { category: actionable ? 'measured_quality_failure' : 'unactionable_evidence', hypothesis },
+    action: { method, nextCandidateId: candidate?.id ?? null, changes },
+    caveat: 'This is a bounded experiment hypothesis, not a causal proof or a business-quality verdict.' };
+}
+
+export function chooseReflectiveProposal({ pool, baselineIndices, previous }) {
+  if (!previous.length) {
+    return { ...pool.find((item) => item.indices.every((value, i) => value === baselineIndices[i])), parentId: null };
+  }
+  const last = [...previous].reverse().find((item) => item?.id);
+  if (!last) return null;
+  if (last.reflection) {
+    const selected = pool.find((item) => item.id === last.reflection.action.nextCandidateId);
+    return selected ? { ...selected, parentId: last.id } : null;
+  }
+  // Continuing after a passing trial is optional, but never reuses a config.
+  const remaining = untried(pool, previous);
+  const selected = remaining.length ? mostNovel(remaining, previous, pool.find((item) => item.id === last.id)?.indices ?? baselineIndices, pool) : null;
+  return selected ? { ...selected, parentId: last.id } : null;
 }

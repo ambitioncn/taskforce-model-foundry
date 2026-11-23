@@ -9,7 +9,7 @@ import { train, evaluate } from '../api.mjs';
 import { readMetric } from '../eval/gates.mjs';
 import { assertReportIntegrity } from '../jobs/evaluate.mjs';
 import { runJob, readJobState, readAuditLog } from '../jobs/runner.mjs';
-import { buildProposalPool, chooseNextProposal } from './proposals.mjs';
+import { buildProposalPool, chooseNextProposal, chooseReflectiveProposal, reflectOnFailedTrial, gateFailureSeverity } from './proposals.mjs';
 
 export const CAMPAIGN_FORMAT = 'tmf-campaign-v1';
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -175,13 +175,19 @@ export async function runCampaign({ planFile, signal = null, resumeCancelled = f
     if (passed && (typeof score !== 'number' || !Number.isFinite(score))) {
       throw new Error(`${candidate.id}: rank metric ${plan.policy.rankMetric} missing or nonfinite`);
     }
+    const scoreValue = typeof score === 'number' && Number.isFinite(score) ? score : null;
+    const gateSeverity = gateFailureSeverity(report.gates?.results);
+    const reflection = !passed && plan.proposal?.strategy === 'reflective'
+      ? reflectOnFailedTrial({ pool: snapshots, previous, current: { ...candidate, score: scoreValue, gateSeverity },
+        report, direction: plan.policy.direction }) : null;
     return { id: candidate.id, jobId: candidate.jobId, configFile,
       state: passed ? 'technical_passed' : 'technical_failed',
       externalQualityRequired: candidate.externalQualityRequired,
-      proposal: candidate.parameters ? { strategy: 'best-neighbor', parameters: candidate.parameters,
+      proposal: candidate.parameters ? { strategy: plan.proposal.strategy, parameters: candidate.parameters,
         parentId: candidate.parentId } : null,
+      reflection,
       reportFile, reportDigest: report.reportDigest,
-      score: typeof score === 'number' && Number.isFinite(score) ? score : null,
+      score: scoreValue, gateSeverity,
       stepsCharged: candidate.steps };
   }
 
@@ -193,9 +199,12 @@ export async function runCampaign({ planFile, signal = null, resumeCancelled = f
         if (plan.policy.stopOnTechnicalPass && previous.some((item) => item.state === 'technical_passed')) {
           return { state: 'skipped_goal_reached' };
         }
-        const candidate = chooseNextProposal({ pool: snapshots,
-          baselineIndices: proposalPool.baselineIndices, previous, direction: plan.policy.direction });
-        if (!candidate) return { state: 'skipped_exhausted' };
+        const candidate = plan.proposal.strategy === 'reflective'
+          ? chooseReflectiveProposal({ pool: snapshots, baselineIndices: proposalPool.baselineIndices, previous })
+          : chooseNextProposal({ pool: snapshots, baselineIndices: proposalPool.baselineIndices,
+            previous, direction: plan.policy.direction });
+        if (!candidate) return { state: [...previous].reverse().find((item) => item?.id)?.reflection?.action.method === 'stop_unactionable'
+          ? 'skipped_unactionable_evidence' : 'skipped_exhausted' };
         return runTrial(candidate, previous);
       },
     }))

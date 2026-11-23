@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { synthesize } from '../src/api.mjs';
-import { buildProposalPool, chooseNextProposal } from '../src/controller/index.mjs';
+import { buildProposalPool, chooseNextProposal, chooseReflectiveProposal, reflectOnFailedTrial, gateFailureSeverity } from '../src/controller/index.mjs';
 import { loadCampaign, runCampaign } from '../src/controller/campaign.mjs';
 
 const baseRaw = {
@@ -48,6 +48,57 @@ test('proposal refuses edits outside approved numeric hyperparameters', () => {
     baseRaw, baseDir: '/tmp' }), /strictly increasing/);
 });
 
+test('reflective search records failed evidence and jumps beyond neighbors', () => {
+  const built = buildProposalPool({ proposal: { ...space, strategy: 'reflective' }, baseRaw, baseDir: '/tmp' });
+  const first = chooseReflectiveProposal({ ...built, previous: [] });
+  assert.equal(first.id, 'p-1-1');
+  const report = { reportDigest: 'frozen-report', gates: { results: [
+    { id: 'loss', metric: 'tuned.holdout.loss', actual: 2, comparator: 'lte', threshold: 1, ok: false, reason: 'loss too high' },
+  ] } };
+  const reflection = reflectOnFailedTrial({ pool: built.pool, previous: [], current: { ...first, score: 2 }, report, direction: 'min' });
+  assert.equal(reflection.observation.failedGates[0].threshold, 1);
+  assert.equal(reflection.action.method, 'contrast');
+  const second = chooseReflectiveProposal({ ...built, previous: [{ ...first, score: 2, reflection }] });
+  assert.equal(second.id, 'p-0-0'); // two dimensions away, not a neighbor
+  assert.equal(reflection.action.nextCandidateId, second.id);
+  assert.deepEqual(Object.keys(reflection.action.changes), ['hyper.lr', 'hyper.batchSize']);
+  const failedAgain = reflectOnFailedTrial({ pool: built.pool, previous: [{ ...first, score: 2, reflection }],
+    current: { ...second, score: 1.5 }, report, direction: 'min' });
+  assert.equal(failedAgain.observation.bestPrior.id, first.id);
+  assert.equal(failedAgain.action.method, 'pivot'); // improved but no farther point in that direction
+});
+
+test('reflective search stops rather than pretending hyperparameters fix missing evidence', () => {
+  const built = buildProposalPool({ proposal: { ...space, strategy: 'reflective' }, baseRaw, baseDir: '/tmp' });
+  const first = chooseReflectiveProposal({ ...built, previous: [] });
+  const reflection = reflectOnFailedTrial({ pool: built.pool, previous: [], current: { ...first, score: 1 },
+    report: { reportDigest: 'missing-samples', gates: { results: [
+      { id: 'exact-match', metric: 'tuned.holdout.exactMatch.accuracy', actual: 0.9,
+        comparator: 'gte', threshold: 0.25, samples: 2, minSamples: 10, ok: false },
+    ] } }, direction: 'max' });
+  assert.equal(reflection.action.method, 'stop_unactionable');
+  assert.equal(chooseReflectiveProposal({ ...built, previous: [{ ...first, score: 1, reflection }] }), null);
+  assert.equal(chooseReflectiveProposal({ ...built, previous: [
+    { ...first, score: 1, reflection }, { state: 'skipped_unactionable_evidence' },
+  ] }), null);
+});
+
+test('reflection prioritizes frozen gate failures over a misleading rank metric', () => {
+  assert.equal(gateFailureSeverity([{ actual: 0.2, comparator: 'gte', threshold: 0.5, ok: false }]), 0.3);
+  const built = buildProposalPool({ proposal: { ...space, strategy: 'reflective' }, baseRaw, baseDir: '/tmp' });
+  const prior = built.pool.find((item) => item.id === 'p-0-1');
+  const current = built.pool.find((item) => item.id === 'p-1-1');
+  const result = reflectOnFailedTrial({ pool: built.pool,
+    previous: [{ ...prior, score: 0.1, gateSeverity: 0.6 }],
+    current: { ...current, score: 0.2, gateSeverity: 0.3 },
+    report: { reportDigest: 'gate-evidence', gates: { results: [
+      { id: 'quality', metric: 'tuned.quality', actual: 0.2, comparator: 'gte', threshold: 0.5, ok: false },
+    ] } }, direction: 'min' });
+  assert.equal(result.action.method, 'extrapolate');
+  assert.equal(result.action.nextCandidateId, 'p-2-0');
+  assert.equal(result.observation.gateSeverity, 0.3);
+});
+
 async function fixture(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tmf-proposal-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -89,4 +140,55 @@ test('campaign creates reviewable configs and evaluates new candidates within bu
   raw.eval.gates[0].threshold = 101;
   await fs.writeFile(path.join(dir, 'base.json'), JSON.stringify(raw));
   await assert.rejects(() => runCampaign({ planFile }), /different input\/plan digest|generated candidate file was changed/);
+});
+
+test('failed campaign trials retain reflection, proposed action, and frozen gates', async (t) => {
+  const { dir, planFile } = await fixture(t);
+  const plan = JSON.parse(await fs.readFile(planFile));
+  plan.proposal.strategy = 'reflective';
+  plan.proposal.parameters.push({ path: 'hyper.batchSize', values: [2, 4, 8] });
+  plan.budget.maxTrials = 2;
+  await fs.writeFile(planFile, JSON.stringify(plan));
+  const configFile = path.join(dir, 'base.json');
+  const config = JSON.parse(await fs.readFile(configFile));
+  config.eval.gates[0].threshold = -1;
+  await fs.writeFile(configFile, JSON.stringify(config));
+  const run = await runCampaign({ planFile });
+  assert.equal(run.result.status, 'no_candidate_passed');
+  assert.deepEqual(run.result.trials.map((item) => item.id), ['p-1-1', 'p-0-0']);
+  assert.equal(run.result.trials[0].reflection.observation.failedGates[0].threshold, -1);
+  assert.equal(run.result.trials[0].reflection.action.method, 'contrast');
+  assert.equal(run.result.trials[1].proposal.parentId, 'p-1-1');
+  assert.equal(run.result.trials[1].stepsCharged, 2);
+  assert.equal((await runCampaign({ planFile })).replayed, true);
+});
+
+test('reflective campaign completes in a standalone background worker', async (t) => {
+  const { dir, planFile } = await fixture(t);
+  const plan = JSON.parse(await fs.readFile(planFile));
+  plan.proposal.strategy = 'reflective';
+  plan.proposal.parameters.push({ path: 'hyper.batchSize', values: [2, 4, 8] });
+  await fs.writeFile(planFile, JSON.stringify(plan));
+  const configFile = path.join(dir, 'base.json');
+  const config = JSON.parse(await fs.readFile(configFile));
+  config.eval.gates[0].threshold = -1;
+  await fs.writeFile(configFile, JSON.stringify(config));
+  const priorLauncher = process.env.TMF_BACKGROUND_LAUNCHER;
+  process.env.TMF_BACKGROUND_LAUNCHER = 'direct';
+  t.after(() => { if (priorLauncher === undefined) delete process.env.TMF_BACKGROUND_LAUNCHER;
+    else process.env.TMF_BACKGROUND_LAUNCHER = priorLauncher; });
+  const { startCampaign, backgroundCampaignStatus } = await import('../src/controller/background.mjs');
+  const started = await startCampaign({ planFile });
+  assert.equal(started.state, 'starting');
+  let final;
+  for (let n = 0; n < 200; n++) {
+    final = await backgroundCampaignStatus({ planFile });
+    if (['succeeded', 'failed', 'interrupted'].includes(final.state)) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(final.state, 'succeeded', JSON.stringify(final.workerResult));
+  assert.equal(final.decision.status, 'no_candidate_passed');
+  assert.equal(final.decision.trials[0].reflection.action.nextCandidateId, 'p-0-0');
+  assert.equal(final.decision.trials[1].proposal.parentId, 'p-1-1');
+  assert.equal(final.decision.exported, false);
 });

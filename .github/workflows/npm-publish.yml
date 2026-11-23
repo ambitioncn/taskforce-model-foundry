@@ -1,0 +1,37 @@
+name: Publish npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing GitHub release version, without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify tagged version
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          test "$(node -p 'require("./package.json").version')" = "$EXPECTED_VERSION"
+          test "$(node bin/tmf.mjs --version)" = "$EXPECTED_VERSION"
+      - run: npm test
+      - run: npm publish --access public --ignore-scripts

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { copyFile, readFile, readdir } from 'node:fs/promises';
 import { ensureDir, writeJson, writeFileAtomic, exists } from '../core/fsx.mjs';
 import { sha256File, sha256Json, stableStringify } from '../core/hash.mjs';
+import { VERSION } from '../version.mjs';
 
 export const EXPORT_FORMAT = 'tmf.export/v1';
 
@@ -253,7 +254,7 @@ export async function exportModel({
   externalQuality = null,
   config = null,
   name = config?.project ?? 'taskforce-model',
-  version = '0.2.0',
+  version = VERSION,
   toolkitVersion = null,
   clock = () => new Date().toISOString(),
 }) {

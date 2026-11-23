@@ -1,6 +1,6 @@
 {
   "name": "taskforce-model-foundry",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Taskforce Model Foundry: standalone model customization engine with optional agent-harness adapters. Real post-training, independent evaluation, auditable jobs, and signed export lineage.",
   "type": "module",
   "license": "MIT",

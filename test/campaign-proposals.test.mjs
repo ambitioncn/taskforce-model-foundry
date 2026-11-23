@@ -181,12 +181,15 @@ test('reflective campaign completes in a standalone background worker', async (t
   const started = await startCampaign({ planFile });
   assert.equal(started.state, 'starting');
   let final;
-  for (let n = 0; n < 200; n++) {
+  // The full suite runs workers concurrently on shared CI runners. Bound the
+  // wait by wall clock, but leave enough room for scheduler contention.
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
     final = await backgroundCampaignStatus({ planFile });
     if (['succeeded', 'failed', 'interrupted'].includes(final.state)) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  assert.equal(final.state, 'succeeded', JSON.stringify(final.workerResult));
+  assert.equal(final.state, 'succeeded', JSON.stringify({ state: final.run, worker: final.workerResult }));
   assert.equal(final.decision.status, 'no_candidate_passed');
   assert.equal(final.decision.trials[0].reflection.action.nextCandidateId, 'p-0-0');
   assert.equal(final.decision.trials[1].proposal.parentId, 'p-1-1');

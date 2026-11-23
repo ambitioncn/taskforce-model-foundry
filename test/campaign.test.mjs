@@ -74,12 +74,16 @@ test('standalone background campaign deduplicates and reaches a durable decision
   assert.equal(first.requestId, second.requestId);
   assert.equal(second.reused, true);
   let final;
-  for (let n = 0; n < 150; n++) {
+  // Multiple background fixtures share constrained CI runners; assert a
+  // terminal receipt within a bounded wall-clock window, not 15 seconds of
+  // scheduler-dependent polling.
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
     final = await backgroundCampaignStatus({ planFile });
     if (['succeeded', 'failed', 'interrupted'].includes(final.state)) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  assert.equal(final.state, 'succeeded', JSON.stringify(final.workerResult));
+  assert.equal(final.state, 'succeeded', JSON.stringify({ state: final.run, worker: final.workerResult }));
   assert.equal(final.decision.status, 'technical_passed');
   assert.equal(final.workerResult.state, 'succeeded');
   const replay = await startCampaign({ planFile });

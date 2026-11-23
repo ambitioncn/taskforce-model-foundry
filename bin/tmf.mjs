@@ -14,6 +14,8 @@ import {
 } from '../src/config.mjs';
 import { writeJson, readJson, exists } from '../src/core/fsx.mjs';
 import { VERSION } from '../src/index.mjs';
+import { startBackgroundEvaluation, backgroundEvaluationStatus } from '../src/integrations/async-evaluate.mjs';
+import { startBackgroundTraining, backgroundTrainingStatus, cancelBackgroundTraining } from '../src/integrations/async-train.mjs';
 
 const USAGE = `taskforce-model-foundry ${VERSION}
 
@@ -27,8 +29,12 @@ Commands:
   synth                  Generate a synthetic corpus (no private data needed)
   train                  Run a real post-training job
   evaluate               Score a finished job on an independent holdout
+  train-status <job> <requestId>     Read a background training receipt
+  evaluate-status <job> <requestId>  Read a background evaluation receipt
+  train-cancel <job> <requestId>     Cancel background training
   export                 Package a deliverable bundle (gated on evaluation)
                          --report <file> reuses an existing eval report instead of re-evaluating
+                         --quality-report <file> pins predeclared external quality evidence
   status <jobId>         Show durable job state and recent audit events
   version                Print the version
   help                   Print this help
@@ -42,6 +48,8 @@ Options:
       --count <n>        Record count (synth/init, default: 160)
       --resume-cancelled Resume a job that an operator cancelled
       --no-resume        Ignore existing job state instead of resuming
+      --background       Run train/evaluate in an independent worker; return requestId
+      --retry            Explicitly retry a failed/interrupted background request
 
 Exit codes:
   0 ok   1 the job ran and did not succeed   2 usage error
@@ -49,7 +57,7 @@ Exit codes:
 `;
 
 function parseArgs(argv) {
-  const opts = { _: [], json: false, resume: true, resumeCancelled: false };
+  const opts = { _: [], json: false, resume: true, resumeCancelled: false, background: false, retry: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = () => {
@@ -65,10 +73,13 @@ function parseArgs(argv) {
       case '--job': opts.job = next(); break;
       case '--out': opts.out = next(); break;
       case '--report': opts.report = next(); break;
+      case '--quality-report': opts.qualityReport = next(); break;
       case '--bundle-version': opts.bundleVersion = next(); break;
       case '--count': opts.count = Number(next()); break;
       case '--resume-cancelled': opts.resumeCancelled = true; break;
       case '--no-resume': opts.resume = false; break;
+      case '--background': opts.background = true; break;
+      case '--retry': opts.retry = true; break;
       case '-h': case '--help': opts.help = true; break;
       case '-v': case '--version': opts.version = true; break;
       default:
@@ -185,6 +196,16 @@ function installCancelHandlers(controller) {
 
 async function cmdTrain(opts, baseDir) {
   const { file, config } = await loadConfig({ file: opts.config ?? null, baseDir });
+  if (opts.background) {
+    if (!opts.job) throw new UsageError('background training requires --job <stable-id>');
+    if (!opts.resume) throw new UsageError('background training does not accept --no-resume');
+    const receipt = await startBackgroundTraining({
+      baseDir, configFile: file, jobId: opts.job, resumeCancelled: opts.resumeCancelled, retry: opts.retry,
+    });
+    out(opts, receipt, [`training request ${receipt.requestId}: ${receipt.state}`, `status: tmf train-status ${opts.job} ${receipt.requestId} --config ${file}`, `log: ${receipt.logFile ?? '(pending)'}`]);
+    return receipt.state === 'failed' ? 1 : 0;
+  }
+  if (opts.retry) throw new UsageError('--retry requires --background');
   const controller = new AbortController();
   const disarm = installCancelHandlers(controller);
   let job; let artifacts;
@@ -232,6 +253,15 @@ async function cmdTrain(opts, baseDir) {
 
 async function cmdEvaluate(opts, baseDir) {
   const { file, config } = await loadConfig({ file: opts.config ?? null, baseDir });
+  if (opts.background) {
+    if (!opts.job) throw new UsageError('background evaluation requires --job <stable-id>');
+    const receipt = await startBackgroundEvaluation({
+      baseDir, configFile: file, jobId: opts.job, reportFile: opts.report ?? null, retry: opts.retry,
+    });
+    out(opts, receipt, [`evaluation request ${receipt.requestId}: ${receipt.state}`, `status: tmf evaluate-status ${opts.job} ${receipt.requestId} --config ${file}`]);
+    return receipt.state === 'failed' ? 1 : 0;
+  }
+  if (opts.retry) throw new UsageError('--retry requires --background');
   const { artifacts, report } = await evaluate({
     config, baseDir, jobId: opts.job ?? null, reportFile: opts.report ?? null,
   });
@@ -270,6 +300,7 @@ async function cmdExport(opts, baseDir) {
     ({ bundle, report } = await exportModel({
       config, baseDir, jobId: opts.job ?? null, outDir: opts.out ?? null, version: opts.bundleVersion ?? null,
       evalReport, evaluateIfMissing: !evalReport,
+      qualityReport: opts.qualityReport ?? null,
     }));
   } catch (err) {
     // A blocked export is an expected outcome, not a crash: report the reason
@@ -308,6 +339,24 @@ async function cmdStatus(opts, baseDir, rest) {
   return 0;
 }
 
+async function cmdBackgroundStatus(opts, baseDir, rest, kind) {
+  const [jobId, requestId] = rest;
+  if (!jobId || !requestId) throw new UsageError(`usage: tmf ${kind}-status <jobId> <requestId>`);
+  const receipt = kind === 'train'
+    ? await backgroundTrainingStatus({ baseDir, configFile: opts.config ?? null, jobId, requestId })
+    : await backgroundEvaluationStatus({ baseDir, configFile: opts.config ?? null, jobId, requestId });
+  out(opts, receipt, [`${kind} request ${requestId}: ${receipt.state}`, `status: ${receipt.statusFile}`, ...(receipt.logFile ? [`log: ${receipt.logFile}`] : [])]);
+  return ['failed', 'interrupted'].includes(receipt.state) ? 1 : 0;
+}
+
+async function cmdTrainCancel(opts, baseDir, rest) {
+  const [jobId, requestId] = rest;
+  if (!jobId || !requestId) throw new UsageError('usage: tmf train-cancel <jobId> <requestId>');
+  const receipt = await cancelBackgroundTraining({ baseDir, configFile: opts.config ?? null, jobId, requestId });
+  out(opts, receipt, [`training request ${requestId}: ${receipt.state}`]);
+  return 0;
+}
+
 async function main(argv) {
   let opts;
   try {
@@ -333,6 +382,9 @@ async function main(argv) {
     case 'synth': return cmdSynth(opts, baseDir);
     case 'train': return cmdTrain(opts, baseDir);
     case 'evaluate': case 'eval': return cmdEvaluate(opts, baseDir);
+    case 'train-status': return cmdBackgroundStatus(opts, baseDir, rest, 'train');
+    case 'evaluate-status': return cmdBackgroundStatus(opts, baseDir, rest, 'evaluate');
+    case 'train-cancel': return cmdTrainCancel(opts, baseDir, rest);
     case 'export': return cmdExport(opts, baseDir);
     case 'status': return cmdStatus(opts, baseDir, rest);
     default:

@@ -18,6 +18,7 @@
 
 import * as api from '../api.mjs';
 import { startBackgroundEvaluation, backgroundEvaluationStatus } from './async-evaluate.mjs';
+import { startBackgroundTraining, backgroundTrainingStatus, cancelBackgroundTraining } from './async-train.mjs';
 import { VERSION } from '../version.mjs';
 
 /** Bumped only on a breaking change to the action set or envelope shape. */
@@ -50,9 +51,30 @@ const ACTIONS = {
   },
   train: {
     summary: 'Run a post-training job that updates real weights or an adapter.',
-    params: ['configFile', 'jobId', 'resume', 'resumeCancelled', 'auditEveryStep'],
+    params: ['configFile', 'jobId', 'resume', 'resumeCancelled', 'auditEveryStep', 'background', 'retry'],
     compute: true,
-    handler: (ctx, p) => api.train({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId ?? null, resume: p.resume ?? true, resumeCancelled: p.resumeCancelled ?? false, auditEveryStep: p.auditEveryStep ?? 10 }),
+    handler: (ctx, p) => {
+      if (p.retry && !p.background) throw new Error('train retry requires background=true');
+      if (p.background && p.resume === false) throw new Error('background training requires resume=true');
+      if (p.background && !p.jobId) throw new Error('background training requires jobId');
+      return p.background
+        ? startBackgroundTraining({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId, resumeCancelled: p.resumeCancelled ?? false, auditEveryStep: p.auditEveryStep ?? 10, retry: p.retry ?? false })
+        : api.train({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId ?? null, resume: p.resume ?? true, resumeCancelled: p.resumeCancelled ?? false, auditEveryStep: p.auditEveryStep ?? 10 });
+    },
+  },
+  train_status: {
+    summary: 'Read a durable background training receipt without consuming compute.',
+    params: ['configFile', 'jobId', 'requestId'],
+    required: ['jobId', 'requestId'],
+    compute: false,
+    handler: (ctx, p) => backgroundTrainingStatus({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId, requestId: p.requestId }),
+  },
+  train_cancel: {
+    summary: 'Cancel a background training request while preserving completed checkpoints.',
+    params: ['configFile', 'jobId', 'requestId'],
+    required: ['jobId', 'requestId'],
+    compute: true,
+    handler: (ctx, p) => cancelBackgroundTraining({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId, requestId: p.requestId }),
   },
   evaluate: {
     summary: 'Score base vs trained model on the independent holdout and apply gates.',
@@ -71,9 +93,9 @@ const ACTIONS = {
   },
   export: {
     summary: 'Package weights/adapter with lineage, model card and checksums.',
-    params: ['configFile', 'jobId', 'evalReport', 'outDir', 'version', 'evaluateIfMissing'],
+    params: ['configFile', 'jobId', 'evalReport', 'qualityReport', 'outDir', 'version', 'evaluateIfMissing'],
     compute: true,
-    handler: (ctx, p) => api.exportModel({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId ?? null, evalReport: p.evalReport ?? null, outDir: p.outDir ?? null, version: p.version ?? null, evaluateIfMissing: p.evaluateIfMissing ?? true }),
+    handler: (ctx, p) => api.exportModel({ baseDir: ctx.baseDir, configFile: p.configFile ?? ctx.configFile ?? null, jobId: p.jobId ?? null, evalReport: p.evalReport ?? null, qualityReport: p.qualityReport ?? null, outDir: p.outDir ?? null, version: p.version ?? null, evaluateIfMissing: p.evaluateIfMissing ?? true }),
   },
 };
 

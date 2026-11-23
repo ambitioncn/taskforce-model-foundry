@@ -194,6 +194,22 @@ test('splits are deterministic, order-independent and ratio-checked', () => {
   assert.throws(() => splitRecords(records, { train: 1, validation: 0, holdout: 0 }), /holdout split is empty/);
 });
 
+test('dataset assignments preserve pre-registered train, validation and holdout', () => {
+  const names = ['script-train', 'script-validation', 'script-holdout'];
+  const records = names.flatMap((name, group) => Array.from({ length: 12 }, (_, i) => ({
+    id: `${group}-${i}`, text: `distinct story ${group} item ${i}`,
+    prompt: `prompt ${group} ${i}`, completion: `answer ${group} ${i}`,
+    source: { dataset: name },
+  })));
+  const config = { datasetAssignments: Object.fromEntries(names.map((name, i) => [name, ['train', 'validation', 'holdout'][i]])) };
+  const splits = splitRecords(records, config);
+  assert.deepEqual(Object.fromEntries(Object.entries(splits).map(([key, values]) => [key, values.length])), {
+    train: 12, validation: 12, holdout: 12,
+  });
+  assert.ok(splits.holdout.every((row) => row.source.dataset === 'script-holdout'));
+  assert.throws(() => splitRecords([...records, { id: 'unmapped', text: 'unmapped', source: { dataset: 'other' } }], config), /no valid assignment/);
+});
+
 // Records built from a shared template are near-duplicates of each other by
 // construction, which would make the leakage gate fire on the baseline corpus.
 // These fixtures sample a vocabulary instead, so any hit is the injected one.

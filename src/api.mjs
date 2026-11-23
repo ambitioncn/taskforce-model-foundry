@@ -17,6 +17,8 @@ import { encodeRecords } from './train/dataset.mjs';
 import { exportModel as packageExport } from './export/package.mjs';
 import { exists, readJson, readJsonl } from './core/fsx.mjs';
 import { VERSION } from './version.mjs';
+import { sha256Json, sha256File } from './core/hash.mjs';
+import { verifyExternalQuality } from './eval/external-quality.mjs';
 
 export const PRODUCT = 'taskforce-model-foundry';
 const MIN_NODE_MAJOR = 20;
@@ -149,6 +151,7 @@ export async function train({
     modelConfig: resolved.model,
     hyper: resolved.hyper,
     trainBudget: resolved.trainBudget,
+    externalQuality: resolved.eval?.externalQuality ?? null,
     mode: resolved.mode,
     seed: resolved.seed,
     maxVocab: resolved.model.maxVocab,
@@ -221,7 +224,9 @@ async function resolveArtifacts({ artifacts, config, jobId }) {
   const result = Object.fromEntries((state.completedSteps ?? [])
     .filter((step) => step && typeof step === 'object' && step.name)
     .map((step) => [step.name, step.output]));
-  return trainingArtifacts({ ...state, result });
+  // The finalize step is the durable manifest. It includes the predeclared
+  // external-quality contract, which is not a standalone step in the map.
+  return trainingArtifacts({ ...state, result: result.finalize ?? result });
 }
 
 /**
@@ -267,6 +272,7 @@ export async function evaluate({
       seed: resolved.seed,
       dataDir: resolvedArtifacts.dataDir,
       dataReportFile: resolvedArtifacts.dataReportFile ?? null,
+      externalQualityContractDigest: resolvedArtifacts.externalQuality ? sha256Json(resolvedArtifacts.externalQuality) : null,
     },
     reportFile: file,
     maxNewTokens,
@@ -292,6 +298,24 @@ async function readPinnedReport(file, baseDir) {
   return parsed.reportFile ? parsed : { ...parsed, reportFile: abs };
 }
 
+/** Bind a project's external scorer to a successful technical evaluation. */
+export async function qualityContext({ configFile = null, baseDir = process.cwd(), jobId, evalReport } = {}) {
+  const { config } = await loadConfig({ file: configFile, baseDir });
+  const artifacts = await resolveArtifacts({ config, jobId });
+  const technical = typeof evalReport === 'string' ? await readPinnedReport(evalReport, config.baseDir) : evalReport;
+  assertReportIntegrity(technical, { jobId: artifacts.jobId });
+  if (technical.verdict?.status !== 'passed' || !technical.verdict.deliveryEligible) {
+    throw new Error('external quality requires a passed technical evaluation');
+  }
+  const contract = config.eval?.externalQuality;
+  if (!contract || !artifacts.externalQuality || sha256Json(contract) !== sha256Json(artifacts.externalQuality) ||
+      technical.lineage?.externalQualityContractDigest !== sha256Json(contract)) {
+    throw new Error('external quality contract was not frozen into training and technical evaluation');
+  }
+  const checkpoint = artifacts.adapterCheckpoint ?? artifacts.tunedCheckpoint;
+  return { contract, jobId: artifacts.jobId, evalReport: technical, checkpointSha256: await sha256File(checkpoint) };
+}
+
 /**
  * Package a deliverable bundle. The gate lives inside exportModel, so a
  * failed or baseline-only evaluation cannot produce an export.
@@ -303,6 +327,7 @@ export async function exportModel({
   jobId = null,
   artifacts = null,
   evalReport = null,
+  qualityReport = null,
   outDir = null,
   version = null,
   evaluateIfMissing = true,
@@ -325,11 +350,30 @@ export async function exportModel({
     assertReportIntegrity(report, { jobId });
     resolvedArtifacts = await resolveArtifacts({ artifacts, config: resolved, jobId });
   }
+  let externalQuality = null;
+  if (resolved.eval?.externalQuality) {
+    if (!resolvedArtifacts.externalQuality || sha256Json(resolvedArtifacts.externalQuality) !== sha256Json(resolved.eval.externalQuality)) {
+      throw new Error('external quality contract was not frozen into this training job; start a new job with the contract predeclared');
+    }
+    if (report.lineage?.externalQualityContractDigest !== sha256Json(resolved.eval.externalQuality)) {
+      throw new Error('technical evaluation is not bound to the predeclared external quality contract');
+    }
+    externalQuality = await verifyExternalQuality({
+      contract: resolved.eval.externalQuality,
+      evidence: qualityReport,
+      artifacts: resolvedArtifacts,
+      evalReport: report,
+      baseDir: resolved.baseDir,
+    });
+  } else if (qualityReport) {
+    throw new Error('qualityReport supplied but eval.externalQuality was not predeclared in the training config');
+  }
   const target = path.resolve(resolved.baseDir, outDir ?? path.join(resolved.runRootAbsolute, resolvedArtifacts.jobId, 'export'));
   const bundle = await packageExport({
     outDir: target,
     artifacts: resolvedArtifacts,
     evalReport: report,
+    externalQuality,
     config: resolved,
     name: resolved.project,
     version: version ?? VERSION,

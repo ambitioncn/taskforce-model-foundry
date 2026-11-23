@@ -51,22 +51,45 @@ test('hf-peft declares resume and cancel semantics, not bare booleans', () => {
   }
 });
 
-test('hf-peft trains, checkpoints, reloads, evaluates and generates for real', { skip }, async () => {
+test('hf-peft renders explicit quantized recipe and model sequence limit', async () => {
+  const outDir = path.join(runDir, 'render-quantized');
+  const handle = {
+    modelId,
+    modelConfig: { maxSeqLen: 1024, hf: { loadIn4Bit: true, dtype: 'bfloat16', gradientCheckpointing: true } },
+  };
+  const rendered = await backend.renderTrainingScript({
+    handle, examplesFile, outDir,
+    hyper: { batchSize: 1, lr: 0.00001 },
+    budget: { maxSteps: 2, maxMemoryMb: 262144 },
+  });
+  assert.equal(rendered.spec.hf.loadIn4Bit, true);
+  assert.equal(rendered.spec.maxSeqLen, 1024);
+  assert.equal(rendered.spec.maxMemoryMb, 262144);
+});
+
+test('hf-peft trains, checkpoints, reloads, evaluates and generates for real', { skip }, async (t) => {
+  await fs.promises.mkdir(runDir, { recursive: true });
+  const loraDir = await fs.promises.mkdtemp(path.join(runDir, 'lora-fresh-'));
+  t.after(() => fs.promises.rm(loraDir, { recursive: true, force: true }));
   const base = await backend.createModel({ modelId, outDir: runDir });
   const baseline = await backend.evaluate({ handle: base, examplesFile, budget, outDir: path.join(runDir, 'eval-base') });
   assert.ok(Number.isFinite(baseline.loss) && baseline.loss > 0);
   assert.equal(baseline.adapterLoaded, false);
 
   const trained = await backend.train({
-    handle: base, examplesFile, mode: 'lora', outDir: path.join(runDir, 'lora'),
+    handle: base, examplesFile, mode: 'lora', outDir: loraDir,
     hyper: { batchSize: 4, lr: 0.05, lora: { rank: 4, alpha: 8, targets: ['q_proj', 'v_proj'] } }, budget,
   });
   assert.ok(trained.history.length > 0, 'training must report a loss history');
   assert.ok(trained.metrics.parameterL2Delta > 0, 'weights must actually move');
   assert.ok(trained.metrics.trainableParams > 0);
+  assert.ok(trained.metrics.tokensSeen > 0 && Number.isInteger(trained.metrics.tokensSeen),
+    'training must count collated input tokens');
+  assert.ok(trained.metrics.datasetTokens > 0, 'dataset token count is reported separately');
+  assert.ok(trained.metrics.supervisedTokensSeen > 0 && trained.metrics.supervisedTokensSeen <= trained.metrics.tokensSeen);
   assert.ok(trained.checkpoints.length > 0, 'checkpointEvery must write checkpoints');
 
-  const file = path.join(runDir, 'lora', 'tuned.ckpt.json');
+  const file = path.join(loraDir, 'tuned.ckpt.json');
   await backend.saveModel({ handle: trained.handle, file, kind: 'adapter' });
   const reloaded = await backend.loadModel({ file });
   const tuned = await backend.evaluate({ handle: reloaded, examplesFile, budget, outDir: path.join(runDir, 'eval-tuned') });
@@ -77,11 +100,41 @@ test('hf-peft trains, checkpoints, reloads, evaluates and generates for real', {
   assert.equal(typeof text, 'string');
 });
 
+test('single-load split evaluation matches separate loss and generation calls', { skip }, async () => {
+  const base = await backend.createModel({ modelId, outDir: runDir });
+  const rows = fs.readFileSync(examplesFile, 'utf8').trim().split('\n').slice(0, 16).map((line) => JSON.parse(line));
+  const holdoutExamples = rows.slice(0, 8);
+  const validationExamples = rows.slice(8);
+  const prompts = holdoutExamples.map((row) => row.prompt);
+  const oldHoldout = await backend.evaluate({ handle: base, examples: holdoutExamples, budget, outDir: path.join(runDir, 'old-holdout') });
+  const oldValidation = await backend.evaluate({ handle: base, examples: validationExamples, budget, outDir: path.join(runDir, 'old-validation') });
+  const oldTexts = await backend.generateBatch({ handle: base, prompts, maxNewTokens: 3, budget, outDir: path.join(runDir, 'old-generation') });
+  const combined = await backend.evaluateSplitSet({
+    handle: base, holdoutExamples, validationExamples, prompts, maxNewTokens: 3,
+    budget, outDir: path.join(runDir, 'combined-eval'),
+  });
+  assert.equal(combined.holdout.loss, oldHoldout.loss);
+  assert.equal(combined.validation.loss, oldValidation.loss);
+  assert.deepEqual(combined.texts, oldTexts);
+});
+
 test('hf-peft enforces the memory bound instead of ignoring it', { skip }, async () => {
   const base = { backend: 'hf-peft', modelId, mode: 'lora' };
   await assert.rejects(
     () => backend.evaluate({ handle: base, examplesFile, budget: { ...budget, maxMemoryMb: 64 }, outDir: path.join(runDir, 'oom') }),
     (err) => ['BACKEND_MEMORY_LIMIT', 'BACKEND_RESOURCE_LIMIT', 'BACKEND_FAILED'].includes(err.code),
+  );
+});
+
+test('hf-peft stops before a batch that would exceed the token budget', { skip }, async () => {
+  const base = await backend.createModel({ modelId, outDir: runDir });
+  await assert.rejects(
+    () => backend.train({
+      handle: base, examplesFile, mode: 'lora', outDir: path.join(runDir, 'token-cap'),
+      hyper: { batchSize: 1, lr: 0.001, lora: { rank: 4, alpha: 8, targets: ['q_proj', 'v_proj'] } },
+      budget: { ...budget, maxTokens: 1 },
+    }),
+    (err) => err.code === 'BACKEND_TOKEN_BUDGET',
   );
 });
 

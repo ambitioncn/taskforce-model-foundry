@@ -61,7 +61,7 @@ export function isScorableRecord(record) {
   return typeof record?.prompt === 'string' && typeof record?.completion === 'string';
 }
 
-export async function exactMatchOnRecords(backend, handle, records, { maxNewTokens = 48, sampleLimit = 3 } = {}) {
+export async function exactMatchOnRecords(backend, handle, records, { maxNewTokens = 48, sampleLimit = 3, generatedTexts = null } = {}) {
   const scorable = records.filter(isScorableRecord);
   const excluded = records.length - scorable.length;
   let hit = 0;
@@ -70,9 +70,9 @@ export async function exactMatchOnRecords(backend, handle, records, { maxNewToke
   const predictionDigests = [];
   // Backends that own a large model may load it once and generate each prompt
   // sequentially. The result order and exact-match definition stay identical.
-  const generated = scorable.length && typeof backend.generateBatch === 'function'
+  const generated = generatedTexts ?? (scorable.length && typeof backend.generateBatch === 'function'
     ? await backend.generateBatch({ handle, prompts: scorable.map((record) => record.prompt), maxNewTokens })
-    : null;
+    : null);
   if (generated && (!Array.isArray(generated) || generated.length !== scorable.length)) {
     throw new Error(`generateBatch returned ${generated?.length ?? 'invalid'} result(s) for ${scorable.length} prompt(s)`);
   }
@@ -106,6 +106,17 @@ export async function exactMatchOnRecords(backend, handle, records, { maxNewToke
 // One model, both splits, plus greedy-decode exact match on holdout.
 export async function evaluateSplitSet(backend, handle, { encoded, records = {}, maxNewTokens = 48 } = {}) {
   if (!encoded?.holdout?.length) throw new Error('evaluateSplitSet needs encoded holdout examples');
+  if (typeof backend.evaluateSplitSet === 'function') {
+    const scorable = (records.holdout ?? []).filter(isScorableRecord);
+    const combined = await backend.evaluateSplitSet({
+      handle, holdoutExamples: encoded.holdout, validationExamples: encoded.validation ?? [],
+      prompts: scorable.map((record) => record.prompt), maxNewTokens,
+    });
+    const exactMatch = scorable.length
+      ? await exactMatchOnRecords(backend, handle, records.holdout, { maxNewTokens, generatedTexts: combined.texts })
+      : null;
+    return { holdout: { ...combined.holdout, exactMatch }, validation: combined.validation };
+  }
   const holdout = await backend.evaluate({ handle, examples: encoded.holdout });
   const exactMatch = records.holdout?.some(isScorableRecord)
     ? await exactMatchOnRecords(backend, handle, records.holdout, { maxNewTokens })

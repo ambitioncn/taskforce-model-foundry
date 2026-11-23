@@ -89,6 +89,24 @@ random-init local fixture (`docs/reports/g12d-cli-e2e-evidence.json`):
 `tmf evaluate` scores baseline and tuned in two independent processes (tuned
 holdout loss 3.9% better).
 
+Long jobs can use `tmf train --background --job <id>` and
+`tmf evaluate --background --job <id>`; each returns a request ID for
+`train-status` / `evaluate-status`. Training also supports `train-cancel` and
+explicit `--retry` after failure/interruption; `--resume-cancelled` resumes a
+cancelled request as a new attempt. A job ID is bound to one training request:
+changed config/device needs a new job ID. On Linux a user systemd unit
+keeps the worker outside the calling CLI or Gateway process; a direct detached
+fallback is reported as `restartDurable: false`. HF evaluation scores holdout,
+generates predictions and scores validation in one model load per side.
+The report records the actual evaluation device. See
+[`docs/external-quality.md`](docs/external-quality.md) to require separate,
+predeclared domain-quality gates before export.
+`restartDurable: true` means isolated from a **Gateway process restart**, not
+survival of a host reboot or power loss. HF `maxTokens` stops before the next
+over-budget batch; after a hard-killed attempt, tokens spent since the last
+durable training-step receipt cannot be reconstructed and must not be reported
+as a verified cumulative total.
+
 Cancel and resume are stated at the precision the evidence supports.
 `Ctrl-C` or `SIGTERM` during `tmf train` aborts the job's `AbortSignal`: the
 job stops between steps, persists `cancelled` with the steps it did finish,

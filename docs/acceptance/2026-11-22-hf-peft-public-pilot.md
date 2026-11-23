@@ -63,7 +63,7 @@ test and live plugin verification.
 running Gateway restart with a live worker, full 77-class BANKING77 quality,
 and authorized de-identified enterprise data. SIGKILL and targeted `ENOSPC`
 injection exercise failure paths, not those physical events. The public pilot
-does not establish production or Chinese-screenplay-model quality.
+does not establish production or any other domain-specific model quality.
 
 For a local fixture regression run with a supported Python environment:
 

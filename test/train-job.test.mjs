@@ -91,6 +91,21 @@ test('changing the config under an existing jobId is refused', async () => {
   );
 });
 
+test('external quality contract is frozen in training input and manifest', async () => {
+  const base = await fixture();
+  const externalQuality = { suiteSha256: 'a'.repeat(64), scorerSha256: 'b'.repeat(64), gates: [
+    { id: 'quality', metric: 'quality.score', comparator: 'gte', threshold: 0.7 },
+  ] };
+  const job = await runTrainingJob({ ...base, jobId: 'quality-frozen', trainBudget: { maxSteps: 1 }, externalQuality });
+  assert.equal(job.state, 'succeeded');
+  assert.deepEqual(trainingArtifacts(job).externalQuality, externalQuality);
+  assert.deepEqual((await readJson(job.result.manifestFile)).externalQuality, externalQuality);
+  await assert.rejects(
+    () => runTrainingJob({ ...base, jobId: 'quality-frozen', trainBudget: { maxSteps: 1 }, externalQuality: { ...externalQuality, suiteSha256: 'c'.repeat(64) } }),
+    /different input\/plan digest/,
+  );
+});
+
 test('cancellation stops at a step boundary and the job resumes without redoing data or base', async () => {
   const base = await fixture();
   const controller = new AbortController();

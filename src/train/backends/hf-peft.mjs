@@ -135,8 +135,12 @@ async function writeSpec(spec, { outDir, op }) {
 }
 
 function limitsFrom(budget = {}, overrides = {}) {
+  const envMemory = process.env.TMF_HF_MAX_MEMORY_MB;
+  if (envMemory !== undefined && (!Number.isInteger(Number(envMemory)) || Number(envMemory) <= 0)) {
+    throw new Error('TMF_HF_MAX_MEMORY_MB must be a positive integer');
+  }
   return {
-    maxMemoryMb: overrides.maxMemoryMb ?? budget.maxMemoryMb ?? DEFAULT_LIMITS.maxMemoryMb,
+    maxMemoryMb: overrides.maxMemoryMb ?? budget.maxMemoryMb ?? (envMemory ? Number(envMemory) : DEFAULT_LIMITS.maxMemoryMb),
     maxCpuSeconds: overrides.maxCpuSeconds ?? budget.maxCpuSeconds ?? null,
     threads: overrides.threads ?? budget.threads ?? DEFAULT_LIMITS.threads,
     maxSeqLen: overrides.maxSeqLen ?? DEFAULT_LIMITS.maxSeqLen,
@@ -165,7 +169,8 @@ async function runOp(op, spec, { outDir, timeoutMs, signal }) {
       `hf-peft ${op} failed (exit ${result.code}${result.signal ? `, signal ${result.signal}` : ''})`
       + `${memoryBound ? ' due to the configured memory limit' : ''}: ${stderr.slice(-500)}`,
     );
-    err.code = memoryBound ? 'BACKEND_MEMORY_LIMIT'
+    err.code = /TMF_TRAIN_TOKEN_BUDGET_EXCEEDED/.test(stderr) ? 'BACKEND_TOKEN_BUDGET'
+      : memoryBound ? 'BACKEND_MEMORY_LIMIT'
       : result.signal === 'SIGKILL' ? 'BACKEND_RESOURCE_LIMIT'
         : result.timedOut ? 'BACKEND_TIMEOUT' : 'BACKEND_FAILED';
     err.specFile = specFile;
@@ -233,7 +238,7 @@ const backend = {
     // network.
     resourceBounds: ['max-steps', 'max-seconds', 'max-memory-mb', 'max-cpu-seconds', 'threads'],
     isolation: 'process-rlimit',
-    precision: 'float32',
+    precision: 'float32,bfloat16,nf4',
     requiresLocalModelCache: true,
   },
 
@@ -347,6 +352,7 @@ const backend = {
         dir: adapterDir,
         adapterDir,
         mode: adapter.mode ?? 'lora',
+        modelConfig: adapter.modelConfig ?? payload.modelConfig ?? {},
         meta: { ...(adapter.meta ?? {}), attachedTo: file },
         file: attachAdapter,
       };
@@ -358,6 +364,7 @@ const backend = {
       dir: payload.dir,
       adapterDir: payload.adapterDir ?? payload.dir ?? null,
       mode: payload.mode ?? 'lora',
+      modelConfig: payload.modelConfig ?? {},
       meta: payload.meta ?? {},
       file,
     };
@@ -398,6 +405,7 @@ const backend = {
       dir: handle.dir ?? handle.adapterDir ?? null,
       adapterDir: handle.adapterDir ?? handle.dir ?? null,
       mode: handle.mode ?? 'lora',
+      modelConfig: handle.modelConfig ?? {},
       meta,
     };
     await writeFileAtomic(file, `${JSON.stringify(payload)}\n`);
@@ -409,12 +417,13 @@ const backend = {
   // without running it.
   async renderTrainingScript({ handle, examplesFile, hyper = {}, budget = {}, outDir, mode, resumeFrom = null }) {
     await ensureDir(outDir);
-    const limits = limitsFrom(budget, hyper);
+    const limits = limitsFrom(budget, { ...hyper, maxSeqLen: handle?.modelConfig?.maxSeqLen ?? hyper.maxSeqLen });
     const spec = {
       op: 'train',
       modelId: handle?.modelId ?? 'MODEL_ID',
       adapterDir: handle?.adapterDir ?? null,
       mode: mode ?? handle?.mode ?? 'lora',
+      hf: handle?.modelConfig?.hf ?? {},
       examplesFile,
       outDir,
       resumeFrom,
@@ -424,6 +433,7 @@ const backend = {
       lora: hyper.lora ?? { rank: 8, alpha: 16, targets: ['q_proj', 'v_proj'] },
       budget: {
         maxSteps: budget.maxSteps ?? 20,
+        maxTokens: budget.maxTokens ?? null,
         maxSeconds: budget.maxSeconds ?? null,
         checkpointEvery: budget.checkpointEvery ?? 0,
       },
@@ -517,8 +527,13 @@ const backend = {
       modelId: handle.modelId,
       adapterDir: handle.adapterDir ?? handle.dir ?? null,
       mode: handle.mode ?? 'lora',
+      hf: handle.modelConfig?.hf ?? {},
       examplesFile: file,
-      ...limitsFrom(budget, hyper),
+      ...limitsFrom(budget, {
+        ...hyper,
+        maxMemoryMb: handle.modelConfig?.hf?.maxMemoryMb ?? hyper.maxMemoryMb,
+        maxSeqLen: handle.modelConfig?.maxSeqLen ?? hyper.maxSeqLen,
+      }),
     };
     const { payload } = await runOp('evaluate', spec, {
       outDir: dir, timeoutMs: ((budget.maxSeconds ?? 600) + 120) * 1000, signal,
@@ -535,6 +550,52 @@ const backend = {
     };
   },
 
+  // One offline model load scores both loss splits and generates the holdout
+  // continuations. The evaluator keeps the same exact-match diagnostics and
+  // gate logic; only the redundant Python/model startups are removed.
+  async evaluateSplitSet({
+    handle, holdoutExamples, validationExamples = [], prompts = [], maxNewTokens = 48,
+    budget = {}, signal = null, outDir,
+  } = {}) {
+    const probe = await backend.probe();
+    if (!probe.available) throw unavailable('evaluate split set', probe);
+    if (!handle?.modelId || !Array.isArray(holdoutExamples) || !holdoutExamples.length) {
+      throw new Error('hf-peft evaluateSplitSet needs a model and non-empty holdout examples');
+    }
+    const dir = outDir ?? path.join(process.cwd(), '.tmf-run', 'hf-peft-eval-bundle');
+    await ensureDir(dir);
+    const holdoutFile = path.join(dir, 'holdout-examples.jsonl');
+    const validationFile = path.join(dir, 'validation-examples.jsonl');
+    const promptsFile = path.join(dir, 'prompts.jsonl');
+    await writeFileAtomic(holdoutFile, `${holdoutExamples.map((e) => JSON.stringify(e)).join('\n')}\n`);
+    await writeFileAtomic(validationFile, `${validationExamples.map((e) => JSON.stringify(e)).join('\n')}${validationExamples.length ? '\n' : ''}`);
+    await writeFileAtomic(promptsFile, `${prompts.map((prompt) => JSON.stringify({ prompt })).join('\n')}${prompts.length ? '\n' : ''}`);
+    const hf = handle.modelConfig?.hf ?? {};
+    const spec = {
+      modelId: handle.modelId, adapterDir: handle.adapterDir ?? handle.dir ?? null,
+      mode: handle.mode ?? 'lora', hf, holdoutFile, validationFile, promptsFile, maxNewTokens,
+      ...limitsFrom(budget, {
+        maxMemoryMb: hf.maxMemoryMb,
+        maxSeqLen: handle.modelConfig?.maxSeqLen,
+      }),
+    };
+    const maxSeconds = budget.maxSeconds ?? hf.evalMaxSeconds ?? 1800;
+    const { payload } = await runOp('evaluate_bundle', spec, {
+      outDir: dir, timeoutMs: (maxSeconds + 120) * 1000, signal,
+    });
+    if (!Array.isArray(payload.texts) || payload.texts.length !== prompts.length) {
+      throw new Error(`hf-peft evaluate_bundle returned ${payload.texts?.length ?? 'invalid'} predictions for ${prompts.length} prompts`);
+    }
+    const metrics = (part) => part && ({
+      loss: part.loss, perplexity: part.perplexity, tokens: part.tokens,
+      examples: part.examples, adapterLoaded: payload.adapterLoaded,
+      device: payload.device, backend: backend.id, limits: payload.limits,
+      wallClockSeconds: payload.wallClockSeconds, peakRssMb: payload.peakRssMb,
+      peakCudaAllocatedMb: payload.peakCudaAllocatedMb,
+    });
+    return { holdout: metrics(payload.holdout), validation: metrics(payload.validation), texts: payload.texts };
+  },
+
   async generate({
     handle, prompt, maxNewTokens = 16, temperature = 0, seed = 1,
     hyper = {}, budget = {}, signal = null, outDir,
@@ -547,6 +608,7 @@ const backend = {
       modelId: handle.modelId,
       adapterDir: handle.adapterDir ?? handle.dir ?? null,
       mode: handle.mode ?? 'lora',
+      hf: handle.modelConfig?.hf ?? {},
       prompt: prompt ?? '',
       maxNewTokens,
       temperature,
@@ -578,6 +640,7 @@ const backend = {
       modelId: handle.modelId,
       adapterDir: handle.adapterDir ?? handle.dir ?? null,
       mode: handle.mode ?? 'lora',
+      hf: handle.modelConfig?.hf ?? {},
       promptsFile,
       maxNewTokens,
       temperature,

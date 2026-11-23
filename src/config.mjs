@@ -158,16 +158,43 @@ function validateGate(errors, at, raw) {
 function validateEval(errors, at, raw) {
   const evalRaw = requireObject(errors, at, raw, {});
   for (const key of Object.keys(evalRaw)) {
-    if (key !== 'gates') errors.add(`${at}.${key}`, 'unknown eval key (allowed: gates)');
+    if (!['gates', 'externalQuality'].includes(key)) errors.add(`${at}.${key}`, 'unknown eval key (allowed: gates, externalQuality)');
   }
-  if (evalRaw.gates === undefined) return {};
+  const result = {};
+  if (evalRaw.externalQuality !== undefined) {
+    const quality = requireObject(errors, `${at}.externalQuality`, evalRaw.externalQuality, {});
+    for (const key of Object.keys(quality)) {
+      if (!['suiteSha256', 'scorerSha256', 'gates', 'profile', 'references'].includes(key)) errors.add(`${at}.externalQuality.${key}`, 'unknown external quality key');
+    }
+    for (const key of ['suiteSha256', 'scorerSha256']) {
+      if (typeof quality[key] !== 'string' || !/^[a-f0-9]{64}$/.test(quality[key])) errors.add(`${at}.externalQuality.${key}`, 'must be a lowercase SHA-256 digest');
+    }
+    if (!Array.isArray(quality.gates) || quality.gates.length === 0) {
+      errors.add(`${at}.externalQuality.gates`, 'must contain at least one predeclared gate');
+    } else {
+      const gates = quality.gates.map((gate, i) => validateGate(errors, `${at}.externalQuality.gates[${i}]`, gate)).filter(Boolean);
+      if (new Set(gates.map((gate) => gate.id)).size !== gates.length) errors.add(`${at}.externalQuality.gates`, 'duplicate gate id');
+      result.externalQuality = { suiteSha256: quality.suiteSha256, scorerSha256: quality.scorerSha256, gates };
+      if (quality.profile !== undefined) result.externalQuality.profile = requireString(errors, `${at}.externalQuality.profile`, quality.profile, null);
+      if (quality.references !== undefined) {
+        const refs = requireObject(errors, `${at}.externalQuality.references`, quality.references, {});
+        for (const [name, digest] of Object.entries(refs)) {
+          if (!/^[a-zA-Z][a-zA-Z0-9]*$/.test(name) || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) {
+            errors.add(`${at}.externalQuality.references.${name}`, 'must be a named lowercase SHA-256 digest');
+          }
+        }
+        result.externalQuality.references = refs;
+      }
+    }
+  }
+  if (evalRaw.gates === undefined) return result;
   if (!Array.isArray(evalRaw.gates)) {
     errors.add(`${at}.gates`, 'must be an array of gate objects');
-    return {};
+    return result;
   }
   if (evalRaw.gates.length === 0) {
     errors.add(`${at}.gates`, 'must declare at least one gate; omit `eval.gates` to use the built-in defaults');
-    return {};
+    return result;
   }
   const gates = evalRaw.gates.map((gate, i) => validateGate(errors, `${at}.gates[${i}]`, gate)).filter(Boolean);
   const seen = new Set();
@@ -176,7 +203,7 @@ function validateEval(errors, at, raw) {
     if (seen.has(gate.id)) errors.add(`${at}.gates`, `duplicate gate id "${gate.id}"`);
     seen.add(gate.id);
   }
-  return { gates };
+  return { ...result, gates };
 }
 
 // Hyperparameters are a whitelist rather than a free-form bag: an unknown key
@@ -215,6 +242,36 @@ function validateHyper(errors, at, raw) {
   return out;
 }
 
+const HF_OPTIONS = new Set([
+  'loadIn4Bit', 'quantType', 'doubleQuant', 'dtype', 'gradientCheckpointing',
+  'gradientAccumulationSteps', 'lrScheduler', 'warmupSteps', 'optimizer', 'maxGradNorm',
+  'maxMemoryMb', 'evalMaxSeconds',
+]);
+
+function validateHfOptions(errors, raw) {
+  const hf = requireObject(errors, 'model.hf', raw, {});
+  for (const [key, value] of Object.entries(hf)) {
+    if (!HF_OPTIONS.has(key)) {
+      errors.add(`model.hf.${key}`, 'unknown HF option');
+    } else if (['loadIn4Bit', 'doubleQuant', 'gradientCheckpointing'].includes(key) && typeof value !== 'boolean') {
+      errors.add(`model.hf.${key}`, 'must be boolean');
+    } else if (['quantType', 'dtype', 'lrScheduler', 'optimizer'].includes(key) &&
+      (typeof value !== 'string' || !value.trim())) {
+      errors.add(`model.hf.${key}`, 'must be a non-empty string');
+    } else if (['gradientAccumulationSteps', 'warmupSteps', 'maxMemoryMb', 'evalMaxSeconds'].includes(key) &&
+      (!Number.isInteger(value) || value < (key === 'warmupSteps' ? 0 : 1))) {
+      errors.add(`model.hf.${key}`, 'must be a non-negative or positive integer');
+    } else if (key === 'maxGradNorm' && (typeof value !== 'number' || value <= 0)) {
+      errors.add(`model.hf.${key}`, 'must be a positive number');
+    }
+  }
+  if (hf.quantType !== undefined && hf.quantType !== 'nf4') errors.add('model.hf.quantType', 'only nf4 is supported');
+  if (hf.dtype !== undefined && !['float32', 'bfloat16'].includes(hf.dtype)) {
+    errors.add('model.hf.dtype', 'must be float32 or bfloat16');
+  }
+  return hf;
+}
+
 /**
  * Validate and normalize a raw config object.
  *
@@ -244,6 +301,7 @@ export function validateConfig(raw, { baseDir = process.cwd() } = {}) {
     maxVocab: requirePositiveInt(errors, 'model.maxVocab', modelRaw.maxVocab, CONFIG_DEFAULTS.model.maxVocab),
     maxSeqLen: requirePositiveInt(errors, 'model.maxSeqLen', modelRaw.maxSeqLen, CONFIG_DEFAULTS.model.maxSeqLen),
   };
+  if (modelRaw.hf !== undefined) model.hf = validateHfOptions(errors, modelRaw.hf);
 
   const dataRaw = requireObject(errors, 'data', raw.data, {});
   const datasets = validateDatasets(errors, dataRaw.datasets ?? []);

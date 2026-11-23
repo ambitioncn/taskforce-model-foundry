@@ -22,9 +22,9 @@ network.
 npm i taskforce-model-foundry
 
 # from a local tarball, which is how the install path was verified
-npm pack                     # -> taskforce-model-foundry-0.2.0.tgz
+npm pack                     # -> taskforce-model-foundry-0.3.0.tgz
 cd /path/to/host
-npm i /path/to/taskforce-model-foundry-0.2.0.tgz
+npm i /path/to/taskforce-model-foundry-0.3.0.tgz
 ```
 
 The install provides one bin, `tmf` (`node_modules/.bin/tmf`), and the

@@ -21,6 +21,7 @@ export * as gates from './eval/gates.mjs';
 export * as externalQuality from './eval/external-quality.mjs';
 export * as backends from './train/backends/index.mjs';
 export * as exporter from './export/package.mjs';
+export * as controller from './controller/index.mjs';
 export { exportModel, assertDeliverable, ExportBlockedError, EXPORT_FORMAT } from './export/package.mjs';
 
 export { VERSION } from './version.mjs';

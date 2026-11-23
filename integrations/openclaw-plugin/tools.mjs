@@ -2,54 +2,16 @@
 // import so the package's own test suite can assert it without the host
 // package installed. index.mjs adds nothing but the host registration.
 
-import { ACTION_SPECS, createOpenClawAdapter } from '../../src/integrations/openclaw.mjs';
+import { createOpenClawAdapter } from '../../src/integrations/openclaw.mjs';
 
-/** JSON Schema fragment per adapter param. Keyed by param name, not action. */
-export const PARAM_SCHEMA = {
-  configFile: { type: 'string', description: 'Foundry config file path.' },
-  requireConfig: { type: 'boolean', description: 'Fail when no config file is present.' },
-  jobId: { type: 'string', description: 'Durable foundry job id.' },
-  auditTail: { type: 'number', description: 'How many audit-log lines to return.' },
-  outDir: { type: 'string', description: 'Output directory.' },
-  seed: { type: 'number', description: 'Deterministic seed.' },
-  count: { type: 'number', description: 'Number of synthetic records to write.' },
-  profile: { type: 'string', description: 'Synthetic corpus profile name.' },
-  resume: { type: 'boolean', description: 'Resume an interrupted training job.' },
-  resumeCancelled: { type: 'boolean', description: 'Resume a cancelled training job.' },
-  auditEveryStep: { type: 'boolean', description: 'Append an audit entry per training step.' },
-  gates: { type: 'string', description: 'Evaluation gate expression.' },
-  reportFile: { type: 'string', description: 'Where to write the evaluation report.' },
-  maxNewTokens: { type: 'number', description: 'Generation budget per eval sample.' },
-  background: { type: 'boolean', description: 'Run training or evaluation in an independent worker and return a durable request id.' },
-  retry: { type: 'boolean', description: 'Retry the same failed or interrupted background request; never duplicates a running request.' },
-  requestId: { type: 'string', description: 'Background request id returned by tmf_train or tmf_evaluate.' },
-  evalReport: { type: 'string', description: 'Evaluation report consumed by export.' },
-  qualityReport: { type: 'string', description: 'Predeclared external quality evidence report consumed by export.' },
-  version: { type: 'string', description: 'Export version label.' },
-  evaluateIfMissing: { type: 'boolean', description: 'Run evaluation when no report exists.' },
-};
+import { ACTION_SPECS, PARAM_SCHEMA, parametersFor } from '../../src/operations.mjs';
+export { PARAM_SCHEMA, parametersFor } from '../../src/operations.mjs';
 
 export const TOOL_PREFIX = 'tmf_';
 
 /** `tmf_train` -> `train`; exported so the host test can assert the mapping. */
 export function toolNameFor(action) {
   return `${TOOL_PREFIX}${action}`;
-}
-
-export function parametersFor(action) {
-  const spec = ACTION_SPECS[action];
-  const properties = {};
-  for (const param of spec.params) {
-    const schema = PARAM_SCHEMA[param];
-    if (!schema) throw new Error(`no JSON schema declared for param "${param}" of action "${action}"`);
-    properties[param] = schema;
-  }
-  return {
-    type: 'object',
-    additionalProperties: false,
-    properties,
-    ...(spec.required?.length ? { required: [...spec.required] } : {}),
-  };
 }
 
 /**

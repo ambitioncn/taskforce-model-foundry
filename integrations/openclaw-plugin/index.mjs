@@ -3,9 +3,8 @@
 // The host discovers this file through `openclaw.extensions` in package.json
 // plus the `openclaw.plugin.json` manifest at the package root. It is a thin
 // wrapper: the tool list comes from ./tools.mjs, which forwards every call to
-// the in-process adapter in src/integrations/openclaw.mjs, so the host surface
-// cannot drift from the adapter contract or from the `tmf` CLI (both go
-// through src/api.mjs).
+// the in-process adapter in src/integrations/openclaw.mjs. The action names and
+// parameter types come from the harness-neutral src/operations.mjs contract.
 //
 // Naming: adapter action `train` is published as tool `tmf_train`, matching
 // `contracts.tools` in openclaw.plugin.json.

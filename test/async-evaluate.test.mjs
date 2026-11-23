@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { startBackgroundEvaluation, backgroundEvaluationStatus } from '../src/integrations/async-evaluate.mjs';
+import { startBackgroundEvaluation, backgroundEvaluationStatus } from '../src/jobs/async-evaluate.mjs';
 import { synthesize, train } from '../src/api.mjs';
 
 const jobId = 'async-eval-fixture';

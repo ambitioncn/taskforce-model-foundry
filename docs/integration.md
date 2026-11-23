@@ -1,10 +1,10 @@
-# Integration and installation (OpenClaw / Hermes)
+# Standalone operation and optional harness integration
 
 This document is the host-side contract for mounting Taskforce Model Foundry
-inside an agent runtime. Both adapters are **in-process ES modules** — no
-daemon, no socket, no shelling out to the `tmf` CLI — and both are driven by the
-single action table in `src/integrations/openclaw.mjs`, so a new action appears
-on both hosts at once and the two hosts cannot drift.
+inside an agent runtime. The `tmf` CLI and `/api` work without any agent
+harness installed. Both adapters are **in-process ES modules** — no daemon, no
+socket, no shelling out to the `tmf` CLI — and use the harness-neutral action
+contract in `src/operations.mjs`. A new host can use that contract directly.
 
 Verified against the packaged artifact, not the source tree: see
 `artifacts/taskforce-model-foundry/evidence/cp23-r7-pack-install.md` for the
@@ -28,13 +28,15 @@ npm i /path/to/taskforce-model-foundry-0.3.0.tgz
 ```
 
 The install provides one bin, `tmf` (`node_modules/.bin/tmf`), and the
-export specifiers below. `package.json` is a fifth, deliberate `exports` entry
+export specifiers below. `package.json` is a separate, deliberate `exports` entry
 (see §3.1); it is not an API surface.
 
 | Specifier | Purpose |
 | --- | --- |
-| `taskforce-model-foundry` | Root export; re-exports the API plus `.openclaw` / `.hermes`. |
+| `taskforce-model-foundry` | Root export; re-exports the API and legacy adapter namespaces. |
 | `taskforce-model-foundry/api` | Programmatic API (`doctor`, `status`, `synthesize`, `train`, `evaluate`, `exportModel`). |
+| `taskforce-model-foundry/operations` | Harness-neutral actions, typed schemas and invoke client. |
+| `taskforce-model-foundry/controller` | Harness-neutral bounded campaign runner, background start/status/cancel. |
 | `taskforce-model-foundry/integrations/openclaw` | OpenClaw tool-provider adapter. |
 | `taskforce-model-foundry/integrations/openclaw-plugin` | OpenClaw host plugin entry; needs the host-provided `openclaw` package. |
 | `taskforce-model-foundry/integrations/openclaw-plugin/tools` | Host-free tool face (`buildTools`), importable without `openclaw`. |
@@ -42,7 +44,8 @@ export specifiers below. `package.json` is a fifth, deliberate `exports` entry
 
 The root export and the subpaths resolve to the **same module instances**
 (`root.hermes.toolSpecs === hermes.toolSpecs`), so a host may mix specifiers
-without ending up with two copies of the action table.
+without ending up with two copies of the operation contract. New integrations
+should import `/operations`, not either harness adapter.
 
 Smoke-check an install before mounting it:
 
@@ -178,7 +181,7 @@ when no Python interpreter is on PATH).
 
 ## 4. Action and tool table
 
-Nine actions, nine tools, one table. `compute: true` means the call spends real
+Twelve actions, twelve tools, one table. `compute: true` means the call spends real
 CPU time and writes run artifacts; those are the calls a host should gate.
 
 | OpenClaw action | Hermes tool | Compute | Required | Accepted params |
@@ -192,10 +195,13 @@ CPU time and writes run artifacts; those are the calls a host should gate.
 | `evaluate` | `tmf_evaluate` | yes | — | `configFile`, `jobId`, `gates`, `reportFile`, `maxNewTokens`, `background`, `retry` |
 | `evaluate_status` | `tmf_evaluate_status` | no | `jobId`, `requestId` | `configFile`, `jobId`, `requestId` |
 | `export` | `tmf_export` | yes | — | `configFile`, `jobId`, `evalReport`, `qualityReport`, `outDir`, `version`, `evaluateIfMissing` |
+| `campaign_start` | `tmf_campaign_start` | yes | `planFile` | `planFile`, `resumeCancelled` |
+| `campaign_status` | `tmf_campaign_status` | no | `planFile` | `planFile` |
+| `campaign_cancel` | `tmf_campaign_cancel` | yes | `planFile` | `planFile` |
 
 **Read-only mount.** `allowCompute: false` keeps the adapter useful for
-inspection while making compute impossible: the four read-only actions answer
-normally, and all five compute actions are refused with
+inspection while making compute impossible: the five read-only actions answer
+normally, and all seven compute actions are refused with
 `compute-not-authorized` *before* any handler runs — nothing is written, no
 partial job appears. Mount read-only wherever the host cannot itself vouch that
 training was authorized.
@@ -213,7 +219,7 @@ A host can branch on `error.code` without parsing messages.
 | `invalid-json` | Hermes only: the argument string was not valid JSON. |
 | `invalid-params` | Arguments did not decode to a plain object. |
 | `unknown-params` | A param outside the action's accepted list was supplied. |
-| `missing-params` | A required param (today only `jobId`) was absent or null. |
+| `missing-params` | A required param was absent or null. |
 | `compute-not-authorized` | Compute action on an `allowCompute: false` mount. |
 | `config-error` | Config file missing, unparsable or internally inconsistent. |
 | `action-failed` | Fallback for any other handler failure; message carries the detail. |

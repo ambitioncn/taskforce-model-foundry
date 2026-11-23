@@ -5,7 +5,7 @@
 // adapter is the Node module src/integrations/hermes.mjs. Rather than
 // restate the action table in Python, this bridge exposes exactly two
 // line-oriented commands over the existing adapter, so adding an action in
-// src/integrations/openclaw.mjs still surfaces it on Hermes:
+// src/operations.mjs still surfaces it on Hermes:
 //
 //   specs            -> prints {"ok":true,"specs":[...openai function specs]}
 //   call <tool> <json-args>  -> prints the adapter envelope as JSON

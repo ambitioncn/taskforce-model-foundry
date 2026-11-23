@@ -1,15 +1,16 @@
 # taskforce-model-foundry
 
-An automated model customization engine for OpenClaw and Hermes: it generates or
-ingests a corpus, runs **real** post-training (weights actually move), evaluates
-the result on an independent holdout split, and refuses to call a regression an
-improvement.
+An independent model customization engine with optional OpenClaw and Hermes
+adapters: it generates or ingests a corpus, runs **real** post-training (weights
+actually move), evaluates the result on an independent holdout split, and
+refuses to call a regression an improvement.
 
 - Node.js 20+, **zero runtime dependencies**
 - Real training, not a simulation: every job reports its parameter L2 delta
 - Durable, resumable, audited jobs — state is re-read from disk, not memory
 - Gate-guarded evaluation: `assertDeliverable()` throws on a failed gate
 - No private data and no network needed to try it out
+- No agent harness is required for the CLI or programmatic API
 
 ## Quickstart
 
@@ -43,12 +44,26 @@ run against an installed copy.
 ## Programmatic API
 
 ```js
-import { doctor, synthesize, train, status } from 'taskforce-model-foundry';
+import { doctor, synthesize, train, status } from 'taskforce-model-foundry/api';
 ```
 
 The CLI is a thin wrapper over this API, so embedders get identical behaviour
 without shelling out. Lower-level building blocks are exported under the stable
 namespaces `data`, `synth`, `jobs`, `trainJob`, `evalJob`, `gates`, `backends`.
+Harnesses can consume the typed, host-neutral operation contract from
+`taskforce-model-foundry/operations`; OpenClaw and Hermes are optional adapters.
+
+## Autonomous, bounded campaigns
+
+The optional [campaign controller](docs/campaign.md) runs a preapproved list of
+candidate configs or creates new candidates within an approved hyperparameter
+search space, then performs train → independent evaluate → fixed-rule decision.
+An optional `reflective` strategy records each failed gate, compares prior
+evidence and proposes a bounded contrasting, extrapolated or pivoted trial
+rather than only searching adjacent grid points.
+It persists each step, deduplicates background starts and resumes after a
+worker interruption. The controller requires no agent harness. It never
+creates new data, changes quality gates or auto-exports a model.
 
 ## CLI surface
 
@@ -61,6 +76,8 @@ namespaces `data`, `synth`, `jobs`, `trainJob`, `evalJob`, `gates`, `backends`.
 | `tmf synth` | Generate a synthetic corpus |
 | `tmf train` | Run a real post-training job (resumable, cancellable with `Ctrl-C`) |
 | `tmf status <jobId>` | Durable job state and recent audit events |
+| `tmf campaign start/status/cancel --plan <file>` | Independent background campaign lifecycle |
+| `tmf campaign run --plan <file>` | Supervised foreground campaign run |
 
 Exit codes: `0` ok, `1` check/job failed, `2` usage error, `130` job cancelled
 by an operator signal (durable state kept; the printed `--resume-cancelled`

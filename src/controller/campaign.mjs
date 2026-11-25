@@ -2,10 +2,12 @@
 // campaign before execution. A proposal mode may generate hyperparameter
 // candidates, but never invents data/gates or exports/publishes a model.
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { readJson, writeJson, ensureDir, exists } from '../core/fsx.mjs';
 import { sha256File, sha256Json } from '../core/hash.mjs';
 import { loadConfig } from '../config.mjs';
-import { train, evaluate } from '../api.mjs';
+import { train, evaluate, qualityContext } from '../api.mjs';
+import { verifyExternalQuality } from '../eval/external-quality.mjs';
 import { readMetric } from '../eval/gates.mjs';
 import { assertReportIntegrity } from '../jobs/evaluate.mjs';
 import { runJob, readJobState, readAuditLog } from '../jobs/runner.mjs';
@@ -37,7 +39,7 @@ export async function loadCampaign(planFile) {
   const file = path.resolve(planFile);
   const baseDir = path.dirname(file);
   const plan = await readJson(file);
-  exactKeys(plan, ['format', 'id', 'candidates', 'proposal', 'budget', 'policy'], 'campaign');
+  exactKeys(plan, ['format', 'id', 'candidates', 'proposal', 'budget', 'policy', 'qualityRunner'], 'campaign');
   if (plan.format !== CAMPAIGN_FORMAT) throw new Error(`campaign.format must be ${CAMPAIGN_FORMAT}`);
   if (!ID.test(plan.id ?? '')) throw new Error('campaign.id must be a safe identifier');
   const hasCandidates = plan.candidates !== undefined;
@@ -53,6 +55,13 @@ export async function loadCampaign(planFile) {
   if (typeof plan.policy.stopOnTechnicalPass !== 'boolean') throw new Error('campaign.policy.stopOnTechnicalPass must be boolean');
   if (typeof plan.policy.rankMetric !== 'string' || !/^[a-zA-Z][a-zA-Z0-9.]*$/.test(plan.policy.rankMetric)) throw new Error('campaign.policy.rankMetric must be a metric path');
   if (!RANK_DIRECTIONS.has(plan.policy.direction)) throw new Error('campaign.policy.direction must be min or max');
+  let qualityRunner = null;
+  if (plan.qualityRunner) {
+    exactKeys(plan.qualityRunner, ['moduleFile'], 'campaign.qualityRunner');
+    const moduleFile = confinedFile(baseDir, plan.qualityRunner.moduleFile, 'campaign.qualityRunner.moduleFile');
+    if (!(await exists(moduleFile))) throw new Error('campaign.qualityRunner.moduleFile is missing');
+    qualityRunner = { moduleFile, moduleSha256: await sha256File(moduleFile) };
+  }
 
   const seen = new Set();
   const snapshots = [];
@@ -118,11 +127,21 @@ export async function loadCampaign(planFile) {
     }
   }
   if (snapshots[0].steps > maxTotalTrainSteps) throw new Error('campaign budget cannot fund the first candidate');
+  if (qualityRunner && snapshots.some((item) => !item.externalQualityRequired)) {
+    throw new Error('qualityRunner requires a frozen eval.externalQuality contract for every candidate');
+  }
+  if (qualityRunner) {
+    const config = (await loadConfig({ file: proposalPool ? confinedFile(baseDir, plan.proposal.baseConfigFile,
+      'campaign.proposal.baseConfigFile') : snapshots[0].configFile, baseDir })).config;
+    if (config.eval.externalQuality.scorerSha256 !== qualityRunner.moduleSha256) {
+      throw new Error('qualityRunner module SHA-256 must match frozen eval.externalQuality.scorerSha256');
+    }
+  }
   const planSha256 = await sha256File(file);
   const input = proposalPool
-    ? { planSha256, baseConfigSha256, snapshots: snapshots.map(({ raw, config, ...item }) => item), comparableDigest }
-    : { planSha256, snapshots, comparableDigest };
-  return { file, baseDir, plan, snapshots, proposalPool, runRoot, input };
+    ? { planSha256, baseConfigSha256, snapshots: snapshots.map(({ raw, config, ...item }) => item), comparableDigest, qualityRunner }
+    : { planSha256, snapshots, comparableDigest, qualityRunner };
+  return { file, baseDir, plan, snapshots, proposalPool, runRoot, input, qualityRunner };
 }
 
 function previousCandidateOutputs(outputs, snapshots, index) {
@@ -145,10 +164,10 @@ async function materializeProposal(loaded, candidate) {
 /** Runs a frozen, bounded campaign; replay skips every completed trial. */
 export async function runCampaign({ planFile, signal = null, resumeCancelled = false } = {}) {
   const loaded = await loadCampaign(planFile);
-  const { plan, snapshots, proposalPool, runRoot, input } = loaded;
+  const { plan, snapshots, proposalPool, runRoot, input, qualityRunner } = loaded;
 
   async function runTrial(candidate, previous) {
-    if (plan.policy.stopOnTechnicalPass && previous.some((item) => item.state === 'technical_passed')) {
+    if (plan.policy.stopOnTechnicalPass && previous.some((item) => item.state === (qualityRunner ? 'quality_passed' : 'technical_passed'))) {
       return { state: 'skipped_goal_reached' };
     }
     const spent = previous.reduce((sum, item) => sum + (item.stepsCharged ?? 0), 0);
@@ -160,6 +179,7 @@ export async function runCampaign({ planFile, signal = null, resumeCancelled = f
     if (trainResult.job.state !== 'succeeded') throw new Error(`${candidate.id}: training did not succeed`);
     const reportFile = path.join(runRoot, candidate.jobId, 'eval-report.json');
     let report = await exists(reportFile) ? await readJson(reportFile) : null;
+    let artifacts = trainResult.artifacts;
     if (report) {
       assertReportIntegrity(report, { jobId: candidate.jobId });
       if (report.lineage?.externalQualityContractDigest !== candidate.qualityDigest ||
@@ -167,26 +187,47 @@ export async function runCampaign({ planFile, signal = null, resumeCancelled = f
         throw new Error(`${candidate.id}: existing report has incompatible frozen gates or quality lineage`);
       }
     } else {
-      ({ report } = await evaluate({ config: candidate.config ?? null, configFile, baseDir: loaded.baseDir,
+      ({ report, artifacts } = await evaluate({ config: candidate.config ?? null, configFile, baseDir: loaded.baseDir,
         jobId: candidate.jobId, reportFile }));
     }
+    const technicalPassed = Boolean(report.verdict?.deliveryEligible);
+    let quality = null;
+    if (technicalPassed && qualityRunner) {
+      if (await sha256File(qualityRunner.moduleFile) !== qualityRunner.moduleSha256) {
+        throw new Error('quality runner changed after campaign submission');
+      }
+      const context = await qualityContext({ config: candidate.config ?? null, configFile, baseDir: loaded.baseDir,
+        jobId: candidate.jobId, evalReport: report });
+      const qualityReportFile = path.join(runRoot, candidate.jobId, 'quality-report.json');
+      if (!(await exists(qualityReportFile))) {
+        const module = await import(`${pathToFileURL(qualityRunner.moduleFile).href}?sha256=${qualityRunner.moduleSha256}`);
+        if (typeof module.runQuality !== 'function') throw new Error('quality runner must export runQuality(context)');
+        await module.runQuality({ ...context, configFile, reportFile: qualityReportFile,
+          runRoot, baseDir: loaded.baseDir, jobId: candidate.jobId, signal });
+      }
+      quality = await verifyExternalQuality({ contract: context.contract, evidence: qualityReportFile,
+        artifacts, evalReport: report, baseDir: loaded.baseDir, requirePass: false });
+    }
+    const measured = quality?.report ?? report;
     const score = readMetric(report.metrics, plan.policy.rankMetric);
-    const passed = Boolean(report.verdict?.deliveryEligible);
+    const passed = technicalPassed && (!qualityRunner || quality.gates.passed);
     if (passed && (typeof score !== 'number' || !Number.isFinite(score))) {
       throw new Error(`${candidate.id}: rank metric ${plan.policy.rankMetric} missing or nonfinite`);
     }
     const scoreValue = typeof score === 'number' && Number.isFinite(score) ? score : null;
-    const gateSeverity = gateFailureSeverity(report.gates?.results);
+    const gateSeverity = gateFailureSeverity((quality && !quality.gates.passed ? quality.gates : report.gates)?.results);
     const reflection = !passed && plan.proposal?.strategy === 'reflective'
       ? reflectOnFailedTrial({ pool: snapshots, previous, current: { ...candidate, score: scoreValue, gateSeverity },
-        report, direction: plan.policy.direction }) : null;
+        report: { ...measured, gates: quality && !quality.gates.passed ? quality.gates : report.gates },
+        direction: plan.policy.direction }) : null;
     return { id: candidate.id, jobId: candidate.jobId, configFile,
-      state: passed ? 'technical_passed' : 'technical_failed',
+      state: passed ? (qualityRunner ? 'quality_passed' : 'technical_passed') : (technicalPassed ? 'quality_failed' : 'technical_failed'),
       externalQualityRequired: candidate.externalQualityRequired,
       proposal: candidate.parameters ? { strategy: plan.proposal.strategy, parameters: candidate.parameters,
         parentId: candidate.parentId } : null,
       reflection,
       reportFile, reportDigest: report.reportDigest,
+      qualityReportFile: quality?.file ?? null, qualityReportDigest: quality?.report.reportDigest ?? null,
       score: scoreValue, gateSeverity,
       stepsCharged: candidate.steps };
   }
@@ -196,7 +237,7 @@ export async function runCampaign({ planFile, signal = null, resumeCancelled = f
       name: `trial-${index + 1}`,
       run: async ({ outputs }) => {
         const previous = Array.from({ length: index }, (_, i) => outputs[`trial-${i + 1}`]).filter(Boolean);
-        if (plan.policy.stopOnTechnicalPass && previous.some((item) => item.state === 'technical_passed')) {
+        if (plan.policy.stopOnTechnicalPass && previous.some((item) => item.state === (qualityRunner ? 'quality_passed' : 'technical_passed'))) {
           return { state: 'skipped_goal_reached' };
         }
         const candidate = plan.proposal.strategy === 'reflective'
@@ -220,10 +261,10 @@ export async function runCampaign({ planFile, signal = null, resumeCancelled = f
     const trials = proposalPool
       ? Array.from({ length: plan.budget.maxTrials }, (_, i) => outputs[`trial-${i + 1}`])
       : snapshots.map((candidate) => outputs[`candidate-${candidate.id}`]);
-    const passed = trials.filter((item) => item.state === 'technical_passed');
+    const passed = trials.filter((item) => item.state === (qualityRunner ? 'quality_passed' : 'technical_passed'));
     const ordered = passed.sort((a, b) => plan.policy.direction === 'min' ? a.score - b.score : b.score - a.score);
     const selected = ordered[0] ?? null;
-    return { status: selected ? (selected.externalQualityRequired ? 'awaiting_external_quality' : 'technical_passed') : 'no_candidate_passed',
+    return { status: selected ? (qualityRunner ? 'quality_passed' : selected.externalQualityRequired ? 'awaiting_external_quality' : 'technical_passed') : 'no_candidate_passed',
       selected, trials, stepsCharged: trials.reduce((sum, item) => sum + (item.stepsCharged ?? 0), 0),
       technicalOnly: true, exported: false };
   }});

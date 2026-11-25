@@ -109,6 +109,33 @@ campaign contract. Operational failures such as a crashed training worker
 remain terminal for this campaign rather than being mislabeled as a quality
 failure and retried blindly.
 
+### Continue after an external quality failure
+
+To include domain quality in the loop, freeze `eval.externalQuality` in every
+candidate config **before training**, then add a local runner to the manifest:
+
+```json
+"qualityRunner": { "moduleFile": "quality-runner.mjs" }
+```
+
+The module exports `async runQuality(context)` and writes a sealed
+`tmf.external-quality/v1` report to `context.reportFile`. Its context includes
+the frozen contract, job ID, technical report, checkpoint digest, config path,
+run root and cancellation signal. The module SHA-256 must match the frozen
+`eval.externalQuality.scorerSha256`; replay rejects edits. It is operator-supplied
+trusted local code, not a Foundry-supplied judge. The project scorer must
+retain raw outputs and enforce any domain-specific GPU/time budget.
+
+After a technical pass, Foundry validates the quality report against the
+frozen suite, scorer, checkpoint and technical report, then applies the frozen
+external gates. A quality gate failure becomes `quality_failed` with an
+evidence-linked reflection; `reflective` can select another candidate only
+within the approved search grid and remaining step/deadline budget. With a
+quality runner, `stopOnTechnicalPass` means stop after **all required gates**
+pass. Invalid or missing evidence is an operational failure, not permission
+to retry training. Existing campaigns without a quality runner retain their
+technical-only behavior. No automatic export or deployment occurs.
+
 ## Run without a harness
 
 ```bash

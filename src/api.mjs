@@ -299,15 +299,15 @@ async function readPinnedReport(file, baseDir) {
 }
 
 /** Bind a project's external scorer to a successful technical evaluation. */
-export async function qualityContext({ configFile = null, baseDir = process.cwd(), jobId, evalReport } = {}) {
-  const { config } = await loadConfig({ file: configFile, baseDir });
-  const artifacts = await resolveArtifacts({ config, jobId });
-  const technical = typeof evalReport === 'string' ? await readPinnedReport(evalReport, config.baseDir) : evalReport;
+export async function qualityContext({ config = null, configFile = null, baseDir = process.cwd(), jobId, evalReport } = {}) {
+  const resolved = config ?? (await loadConfig({ file: configFile, baseDir })).config;
+  const artifacts = await resolveArtifacts({ config: resolved, jobId });
+  const technical = typeof evalReport === 'string' ? await readPinnedReport(evalReport, resolved.baseDir) : evalReport;
   assertReportIntegrity(technical, { jobId: artifacts.jobId });
   if (technical.verdict?.status !== 'passed' || !technical.verdict.deliveryEligible) {
     throw new Error('external quality requires a passed technical evaluation');
   }
-  const contract = config.eval?.externalQuality;
+  const contract = resolved.eval?.externalQuality;
   if (!contract || !artifacts.externalQuality || sha256Json(contract) !== sha256Json(artifacts.externalQuality) ||
       technical.lineage?.externalQualityContractDigest !== sha256Json(contract)) {
     throw new Error('external quality contract was not frozen into training and technical evaluation');

@@ -19,7 +19,7 @@ function blocked(message, failed = []) {
   throw new ExportBlockedError(`export blocked: ${message}`, { status: 'external_quality', failed });
 }
 
-export async function verifyExternalQuality({ contract, evidence, artifacts, evalReport, baseDir }) {
+export async function verifyExternalQuality({ contract, evidence, artifacts, evalReport, baseDir, requirePass = true }) {
   if (!evidence) blocked('predeclared external quality evidence is missing');
   if (typeof evidence !== 'string') blocked('external quality evidence must be a report file path');
   const file = path.resolve(baseDir, evidence);
@@ -47,6 +47,6 @@ export async function verifyExternalQuality({ contract, evidence, artifacts, eva
     }
   }
   const gates = evaluateGates(report.metrics ?? {}, contract.gates);
-  if (!gates.passed) blocked(`external quality gates failed (${gates.summary})`, gates.failed.map((gate) => gate.id));
+  if (requirePass && !gates.passed) blocked(`external quality gates failed (${gates.summary})`, gates.failed.map((gate) => gate.id));
   return { file, fileSha256: await sha256File(file), report, gates, contractDigest: sha256Json(contract) };
 }

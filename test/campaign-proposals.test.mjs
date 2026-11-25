@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { synthesize } from '../src/api.mjs';
+import { sha256File } from '../src/core/hash.mjs';
 import { buildProposalPool, chooseNextProposal, chooseReflectiveProposal, reflectOnFailedTrial, gateFailureSeverity } from '../src/controller/index.mjs';
 import { loadCampaign, runCampaign } from '../src/controller/campaign.mjs';
 
@@ -161,6 +163,48 @@ test('failed campaign trials retain reflection, proposed action, and frozen gate
   assert.equal(run.result.trials[1].proposal.parentId, 'p-1-1');
   assert.equal(run.result.trials[1].stepsCharged, 2);
   assert.equal((await runCampaign({ planFile })).replayed, true);
+});
+
+test('external quality failure reflects and advances to a new bounded candidate', async (t) => {
+  const { dir, planFile } = await fixture(t);
+  const runnerFile = path.join(dir, 'quality-runner.mjs');
+  const qualityUrl = pathToFileURL(path.resolve('src/eval/external-quality.mjs')).href;
+  const hashUrl = pathToFileURL(path.resolve('src/core/hash.mjs')).href;
+  await fs.writeFile(runnerFile, `import fs from 'node:fs/promises';
+import { sealExternalQualityEvidence } from ${JSON.stringify(qualityUrl)};
+import { sha256Json } from ${JSON.stringify(hashUrl)};
+export async function runQuality({ contract, jobId, evalReport, checkpointSha256, reportFile }) {
+  const rate = jobId.endsWith('--p-1') ? 0.8 : 1.0;
+  const report = sealExternalQualityEvidence({ format: 'tmf.external-quality/v1', jobId,
+    suiteSha256: contract.suiteSha256, scorerSha256: contract.scorerSha256,
+    contractDigest: sha256Json(contract), checkpointSha256,
+    evalReportDigest: evalReport.reportDigest,
+    tunedFingerprint: evalReport.lineage.tunedFingerprint,
+    metrics: { quality: { sceneCompleteRate: rate, count: 120 } } });
+  await fs.writeFile(reportFile, JSON.stringify(report));
+}
+`);
+  const configFile = path.join(dir, 'base.json');
+  const config = JSON.parse(await fs.readFile(configFile));
+  config.eval.externalQuality = { suiteSha256: 'a'.repeat(64), scorerSha256: await sha256File(runnerFile),
+    gates: [{ id: 'scene-complete', metric: 'quality.sceneCompleteRate', comparator: 'gte',
+      threshold: 0.95, sampleMetric: 'quality.count', minSamples: 120 }] };
+  await fs.writeFile(configFile, JSON.stringify(config));
+  const plan = JSON.parse(await fs.readFile(planFile));
+  plan.proposal.strategy = 'reflective';
+  plan.policy.stopOnTechnicalPass = true;
+  plan.qualityRunner = { moduleFile: 'quality-runner.mjs' };
+  await fs.writeFile(planFile, JSON.stringify(plan));
+  const run = await runCampaign({ planFile });
+  assert.equal(run.result.trials[0].state, 'quality_failed');
+  assert.equal(run.result.trials[0].reflection.observation.failedGates[0].actual, 0.8);
+  assert.equal(run.result.trials[0].reflection.observation.failedGates[0].threshold, 0.95);
+  assert.equal(run.result.trials[1].state, 'quality_passed');
+  assert.equal(run.result.status, 'quality_passed');
+  assert.equal(run.result.exported, false);
+  assert.equal((await runCampaign({ planFile })).replayed, true);
+  await fs.writeFile(runnerFile, `${await fs.readFile(runnerFile)}\n// changed`);
+  await assert.rejects(() => runCampaign({ planFile }), /different input\/plan digest|module SHA-256 must match/);
 });
 
 test('reflective campaign completes in a standalone background worker', async (t) => {

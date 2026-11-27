@@ -65,6 +65,11 @@ It persists each step, deduplicates background starts and resumes after a
 worker interruption. The controller requires no agent harness. It never
 creates new data, changes quality gates or auto-exports a model.
 
+The harness-neutral [agent skill](skills/taskforce-model-foundry/SKILL.md)
+documents the operational workflow. Its completion rule distinguishes a
+successful job or diagnostic from acceptance of the overall multi-phase model
+objective; unfinished work must be continued or reported as blocked.
+
 ## CLI surface
 
 | Command | Purpose |
